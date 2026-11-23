@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **Hyprland Lua summon bindings**: the installer prefers `hyprland.lua`, writes Lua press/release
+  bindings and tags them so live collision checks keep the same key on reinstall. The optional
+  mic toggle is checked too; occupied chords fall back together to Super+Alt+C / Super+Alt+Ctrl+C.
+  Offline helpers and aliases require manual setup rather than guessing that a key is free.
+
 - **Hyprland: she sits on windows again under shells that draw on one full-screen layer** (caelestia,
   some quickshell setups). `perch sit` / `perch stand`, her flights and drag snaps used to end in
   `edge hidden … exposed []`: the shell's transparent full-output layer counted as covering every

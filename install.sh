@@ -256,9 +256,13 @@ receipt_init() {
 
 # ---- marked blocks in someone else's config file ----------------------------------------------
 
-bmark() { printf '# %s synaps-avatar (install.sh): %s %s' "$1" "$2" "$1"; }
-block_get() { sed -n "/^$(bmark '>>>' "$2")\$/,/^$(bmark '<<<' "$2")\$/p" "$1" 2>/dev/null | sed '1d;$d'; }
-block_drop() { sed "/^$(bmark '>>>' "$2")\$/,/^$(bmark '<<<' "$2")\$/d" "$1"; }
+bmark() {
+    local comment='#'
+    case ${3:-} in *.lua) comment='--' ;; esac
+    printf '%s %s synaps-avatar (install.sh): %s %s' "$comment" "$1" "$2" "$1"
+}
+block_get() { sed -n "/^$(bmark '>>>' "$2" "${3:-$1}")\$/,/^$(bmark '<<<' "$2" "${3:-$1}")\$/p" "$1" 2>/dev/null | sed '1d;$d'; }
+block_drop() { sed "/^$(bmark '>>>' "$2" "${3:-$1}")\$/,/^$(bmark '<<<' "$2" "${3:-$1}")\$/d" "$1"; }
 # One backup per file per run, before its first change: the file as it was.
 BACKED_UP=''
 backup() {
@@ -276,7 +280,7 @@ backup() {
 # Put BODY in FILE between our markers: the old block replaced, a backup first. Written through
 # (a symlinked dotfile stays a symlink). Not in a pipeline: the backup bookkeeping is this shell's.
 block_put() {
-    local f=$1 tag=$2 body=$3 cur
+    local f=$1 tag=$2 body=$3 cur check_lua=0
     cur=$(block_get "$f" "$tag")
     if [ "$cur" = "$body" ]; then
         good "already in $(tilde "$f")"
@@ -289,20 +293,36 @@ block_put() {
     backup "$f"
     printf '   %s> %s (%s)%s\n' "$D" "$(tilde "$f")" "$tag" "$N"
     printf '%s\n' "$body" | sed "s/^/       $D│$N /"
-    rec block "$tag" "$f"
     [ "$DRY" = 1 ] && return 0
+    block_drop "$f" "$tag" >"$TMP/block"
+    # sed preserves an absent final newline: don't glue our marker to his last statement/comment.
+    if [ -s "$TMP/block" ] && [ -n "$(tail -c 1 "$TMP/block")" ]; then printf '\n' >>"$TMP/block"; fi
     {
-        block_drop "$f" "$tag"
-        bmark '>>>' "$tag"
+        bmark '>>>' "$tag" "$f"
         printf '\n%s\n' "$body"
-        bmark '<<<' "$tag"
+        bmark '<<<' "$tag" "$f"
         printf '\n'
-    } >"$TMP/block"
-    block_write "$f"
+    } >>"$TMP/block"
+    cp -p "$f" "$TMP/block-before" || return 1
+    if [[ $f == *.lua ]] && have luac; then
+        if luac -p "$f" 2>/dev/null; then
+            check_lua=1
+        else
+            warn "local luac cannot parse the original config; skipping its syntax check"
+        fi
+    fi
+    block_write "$f" || return 1
+    if [ "$check_lua" = 1 ] && ! luac -p "$f" 2>"$TMP/luac-error"; then
+        cat "$TMP/block-before" >"$f"
+        warn "Lua syntax check failed; restored $(tilde "$f") from its pre-edit backup (nothing added)"
+        cat "$TMP/luac-error" >&2
+        return 1
+    fi
+    rec block "$tag" "$f"
 }
 block_rm() {
     local f=$1 tag=$2
-    [ -f "$f" ] && grep -qxF "$(bmark '>>>' "$tag")" "$f" || return 0
+    [ -f "$f" ] && grep -qxF -- "$(bmark '>>>' "$tag" "$f")" "$f" || return 0
     if [ -z "$(block_drop "$f" "$tag" | tr -d '[:space:]')" ]; then
         warn "$(tilde "$f") would be empty without her block ($tag): left as it is (take it out by hand)"
         return 0
@@ -1057,13 +1077,36 @@ desktop() {
     case $DESKTOP in
         i3) WMCONF=$(first_file "$CONF/i3/config" "$HOME/.i3/config") ;;
         sway) WMCONF=$(first_file "$CONF/sway/config" "$HOME/.sway/config") ;;
-        hyprland) WMCONF=$(first_file "$CONF/hypr/hyprland.conf") ;;
+        hyprland)
+            WMCONF=$(hypr_config /etc/xdg)
+            if [[ $WMCONF == *.conf ]]; then
+                warn "only hyprland.conf found: Hyprland 0.57+ ignores it; use hyprland.lua on those versions"
+            fi
+            ;;
         *) WMCONF='' ;;
     esac
 }
 
+# Hyprutils' search order, for Lua first, then legacy .conf. The argument is a test root.
+hypr_config() {
+    local system=$1 d ext
+    local dirs=() extra=()
+    [[ $CONF == /* ]] && dirs+=("$CONF")
+    dirs+=("$HOME/.config")
+    IFS=: read -r -a extra <<<"${XDG_CONFIG_DIRS:-}"
+    dirs+=("${extra[@]}" "$system")
+    for ext in lua conf; do
+        for d in "${dirs[@]}"; do
+            if [ -z "$d" ] || [ ! -f "$d/hypr/hyprland.$ext" ]; then continue; fi
+            printf '%s' "$d/hypr/hyprland.$ext"
+            return 0
+        done
+    done
+    return 0
+}
+
 # Lines in WMCONF, outside our blocks, that match a regex.
-wm_grep() { [ -n "$WMCONF" ] && block_drop "$WMCONF" summon | block_drop /dev/stdin autostart | grep -Ei -- "$1"; }
+wm_grep() { [ -n "$WMCONF" ] && block_drop "$WMCONF" summon | block_drop /dev/stdin autostart "$WMCONF" | grep -Ei -- "$1"; }
 
 # The summon key's modifier: MOD_WORD as the lines write it ($mod when the config sets one),
 # MOD_RAW its value, MOD_NAME what he presses (Super, Alt...).
@@ -1083,6 +1126,142 @@ wm_mod() {
     esac
 }
 
+# A Lua string containing a shell command (shell quoting and Lua quoting are separate layers).
+lua_string() {
+    local s=${1//\\/\\\\}
+    s=${s//\"/\\\"}
+    s=${s//$'\n'/\\n} s=${s//$'\r'/\\r} s=${s//$'\t'/\\t}
+    printf '"%s"' "$s"
+}
+hypr_lua() { [[ $WMCONF == *.lua ]]; }
+# Live bindings include helper-generated keys, loops and required modules. Parse JSON, not
+# hyprctl's human output. Lua exec_cmd has an opaque reference, so identify our binds by description;
+# legacy .conf uses the exact exec command. Other actions on the same key still count.
+hypr_live_binds() {
+    have hyprctl && have python3 || return 1
+    local json
+    json=$(hyprctl binds -j 2>/dev/null) || return 1
+    printf '%s' "$json" | python3 -c '
+import json, sys
+try:
+    binds = json.load(sys.stdin)
+    assert isinstance(binds, list)
+    own = {sys.argv[1] + " talk " + action for action in ("press", "release", "toggle")}
+    for b in binds:
+        assert isinstance(b, dict) and isinstance(b.get("modmask"), int) and isinstance(b.get("key"), str)
+        if b.get("description") == "synaps-avatar summon":
+            continue
+        if b.get("dispatcher") == "exec" and b.get("arg") in own:
+            continue
+        if b["key"].lower() != "c" and not (b["key"] == "" and b.get("keycode") == 54):
+            continue
+        kind = {64: "super", 72: "alt", 68: "ctrl", 76: "alt_ctrl"}.get(b["modmask"])
+        if kind:
+            print(kind + "\t" + "hyprctl: " + json.dumps(b))
+except (ValueError, TypeError, AssertionError):
+    sys.exit(1)
+' "$(q "$BIN/avatarctl")"
+}
+
+# A conservative lexer, never Lua evaluation. Ignore comments/strings containing code; accept
+# literal keys (short/long strings) and unambiguous stock mainMod/mod string concatenation.
+# Anything computed, imported or loop-generated needs live binds or a human, not a guessed free key.
+hypr_lua_binds() {
+    if ! have python3; then
+        printf 'unknown\tpython3 unavailable: cannot inspect Lua keys safely\n'
+        return
+    fi
+    block_drop "$WMCONF" summon | block_drop /dev/stdin autostart "$WMCONF" >"$TMP/hypr-scan"
+    python3 - "$TMP/hypr-scan" <<'PYLUA'
+import re, sys
+source = open(sys.argv[1]).read()
+pattern = re.compile(r"""(?P<comment>--\[(?P<ceq>=*)\[.*?\](?P=ceq)\]|--[^\n]*)|(?P<long>\[(?P<eq>=*)\[.*?\](?P=eq)\])|(?P<short>"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')|(?P<word>[A-Za-z_]\w*)|(?P<symbol>\.\.|[^\s])""", re.S)
+tokens = [(m.lastgroup, m.group(), m.start()) for m in pattern.finditer(source) if m.lastgroup != "comment"]
+
+def literal(token):
+    kind, value, _ = token
+    if kind == "short" and "\\" not in value:
+        return value[1:-1]
+    if kind == "long":
+        width = value.index("[", 1) + 1
+        return value[width:-width]
+    return None
+
+def report(kind, token):
+    pos = token[2]
+    line = source[source.rfind("\n", 0, pos) + 1:source.find("\n", pos) if "\n" in source[pos:] else len(source)]
+    print(kind + "\t" + line.strip())
+
+# More than one assignment (or an expression after it) isn't a constant we can trust.
+mods = {}
+for i, token in enumerate(tokens):
+    if token[0] == "word" and token[1] in ("mainMod", "mod") and i + 2 < len(tokens) and tokens[i+1][1] == "=":
+        value = literal(tokens[i+2])
+        if i + 3 < len(tokens) and tokens[i+3][1] in ("..", "(", "[", "+", "-", "and", "or"):
+            value = None
+        mods[token[1]] = value if token[1] not in mods else None
+
+for i, token in enumerate(tokens):
+    if token[0] == "word" and token[1] in ("for", "while", "repeat", "require", "dofile", "loadfile", "load"):
+        report("unknown", token)
+    call = [t[1] for t in tokens[i:i+4]]
+    if call[:2] == ["hl", "["] or (call[:3] == ["hl", ".", "bind"] and call[3:] != ["("]):
+        report("unknown", token)
+    if call != ["hl", ".", "bind", "("]:
+        continue
+    parts, depth = [], 0
+    for part in tokens[i+4:]:
+        if part[1] == "," and depth == 0:
+            break
+        if part[1] == ")" and depth == 0:
+            break
+        parts.append(part)
+        if part[0] == "symbol":
+            depth += (part[1] == "(") - (part[1] == ")")
+    key = literal(parts[0]) if len(parts) == 1 else None
+    if len(parts) == 3 and parts[0][0] == "word" and parts[1][1] == "..":
+        prefix, suffix = mods.get(parts[0][1]), literal(parts[2])
+        if prefix is not None and suffix is not None:
+            key = prefix + suffix
+    if key is None:
+        report("unknown", token)
+        continue
+    aliases = {"WIN": "SUPER", "LOGO": "SUPER", "MOD4": "SUPER", "META": "SUPER", "MOD1": "ALT", "CONTROL": "CTRL"}
+    keys = [aliases.get(p.strip().upper(), p.strip().upper()) for p in key.split("+")]
+    if keys and keys[-1] == "C":
+        modifiers = set(keys[:-1])
+        if modifiers == {"SUPER"}:
+            report("super", token)
+        elif modifiers == {"SUPER", "ALT"}:
+            report("alt", token)
+        elif modifiers == {"SUPER", "CTRL"}:
+            report("ctrl", token)
+        elif modifiers == {"SUPER", "ALT", "CTRL"}:
+            report("alt_ctrl", token)
+PYLUA
+}
+
+hypr_taken() {
+    if [ "$HYPR_BIND_SOURCE" = live ] || hypr_lua; then
+        printf '%s\n' "$HYPR_BINDS" | grep "^$1"$'\t' | cut -f2-
+    else
+        wm_grep '^\s*bind[a-z]*\s*=\s*[^,]+,\s*c\s*,' | awk -F, -v want="$1" '
+            {
+                mods = tolower($1); sub(/^[^=]*=/, "", mods); gsub(/_/, " ", mods)
+                n = split(mods, words, /[[:space:]]+/)
+                super = alt = ctrl = other = 0
+                for (i = 1; i <= n; i++) {
+                    if (words[i] ~ /^(\$mainmod|\$mod|super|win|logo|mod4|meta)$/) super = 1
+                    else if (words[i] ~ /^(alt|mod1)$/) alt = 1
+                    else if (words[i] ~ /^(ctrl|control)$/) ctrl = 1
+                    else if (words[i] != "") other = 1
+                }
+                kind = alt ? (ctrl ? "alt_ctrl" : "alt") : (ctrl ? "ctrl" : "super")
+                if (super && !other && kind == want) print
+            }'
+    fi
+}
+
 # Her key's lines for his WM config. Hyprland: $1 its modifiers (SUPER, or SUPER ALT when Super+C is taken).
 summon_lines() {
     local ctl hm=${1:-SUPER}
@@ -1094,9 +1273,16 @@ summon_lines() {
             if [ "$VOICE" = 1 ]; then printf '\nbindsym %s+Ctrl+c exec --no-startup-id %s talk toggle' "$MOD_WORD" "$ctl"; fi
             ;;
         hyprland)
-            printf 'bind = %s, C, exec, %s talk press\n' "$hm" "$ctl"
-            printf 'bindr = %s, C, exec, %s talk release' "$hm" "$ctl"
-            if [ "$VOICE" = 1 ]; then printf '\nbind = %s CTRL, C, exec, %s talk toggle' "$hm" "$ctl"; fi
+            if hypr_lua; then
+                hm=${hm// / + }
+                printf 'hl.bind("%s + C", hl.dsp.exec_cmd(%s), { description = "synaps-avatar summon" })\n' "$hm" "$(lua_string "$ctl talk press")"
+                printf 'hl.bind("%s + C", hl.dsp.exec_cmd(%s), { release = true, description = "synaps-avatar summon" })' "$hm" "$(lua_string "$ctl talk release")"
+                if [ "$VOICE" = 1 ]; then printf '\nhl.bind("%s + CTRL + C", hl.dsp.exec_cmd(%s), { description = "synaps-avatar summon" })' "$hm" "$(lua_string "$ctl talk toggle")"; fi
+            else
+                printf 'bind = %s, C, exec, %s talk press\n' "$hm" "$ctl"
+                printf 'bindr = %s, C, exec, %s talk release' "$hm" "$ctl"
+                if [ "$VOICE" = 1 ]; then printf '\nbind = %s CTRL, C, exec, %s talk toggle' "$hm" "$ctl"; fi
+            fi
             ;;
     esac
     return 0
@@ -1136,32 +1322,68 @@ step_summon() {
         SUMMON="your own binding"
         return 0
     fi
-    local clash alt key=$MOD_NAME+C
-    case $DESKTOP in
-        i3 | sway) clash=$(wm_grep "^\\s*bindsym\\s+(--\\S+\\s+)*(\\\$mod|$MOD_RAW)\\+c\\s" || true) ;;
-        hyprland) clash=$(wm_grep '^\s*bind[a-z]*\s*=\s*(\$mainmod|\$mod|super)\s*,\s*c\s*,' || true) ;;
-    esac
-    if [ -n "$clash" ]; then
-        warn "$MOD_NAME+C is taken: $(printf '%s' "$clash" | head -n1 | sed 's/^\s*//')"
-        # Hyprland's stock config closes a window on Super+C: Super+Alt+C then (Windows' key), if it's free.
-        if [ "$DESKTOP" = hyprland ]; then
-            alt=$(wm_grep '^\s*bind[a-z]*\s*=\s*((\$mainmod|\$mod|super|win)[ _]*alt|alt[ _]*(\$mainmod|\$mod|super|win))\s*,\s*c\s*,' || true)
-            if [ -z "$alt" ]; then
-                key=Super+Alt+C
-                lines=$(summon_lines 'SUPER ALT')
-            else
-                warn "Super+Alt+C is taken too: $(printf '%s' "$alt" | head -n1 | sed 's/^\s*//')"
+    local clash alt toggle='' alt_toggle='' unknown='' key=$MOD_NAME+C HYPR_BINDS='' HYPR_BIND_SOURCE=static
+    if [ "$DESKTOP" = hyprland ]; then
+        if HYPR_BINDS=$(hypr_live_binds); then
+            HYPR_BIND_SOURCE=live
+        elif hypr_lua; then
+            if ! HYPR_BINDS=$(hypr_lua_binds); then
+                HYPR_BINDS=$'unknown\tLua key scan failed; check the config by hand'
             fi
+            unknown=$(printf '%s\n' "$HYPR_BINDS" | grep '^unknown' | cut -f2- || true)
         fi
     fi
-    if [ -n "$clash" ] && [ "$key" = "$MOD_NAME+C" ]; then
+    case $DESKTOP in
+        i3 | sway) clash=$(wm_grep "^\\s*bindsym\\s+(--\\S+\\s+)*(\\\$mod|$MOD_RAW)\\+c\\s" || true) ;;
+        hyprland) clash=$(hypr_taken super || true) ;;
+    esac
+    if [ "$DESKTOP" = hyprland ] && [ "$VOICE" = 1 ]; then
+        toggle=$(hypr_taken ctrl || true)
+    fi
+    if [ -n "$clash" ]; then
+        warn "$MOD_NAME+C is taken: $(printf '%s' "$clash" | head -n1 | sed 's/^\s*//')"
+    fi
+    if [ -n "$toggle" ]; then
+        warn "Super+Ctrl+C is taken: $(printf '%s' "$toggle" | head -n1 | sed 's/^\s*//')"
+    fi
+    if [ -n "$clash$toggle" ] && [ "$DESKTOP" = hyprland ]; then
+        # Move the whole pair together: neither summon nor --voice may override his key.
+        alt=$(hypr_taken alt || true)
+        if [ "$VOICE" = 1 ]; then alt_toggle=$(hypr_taken alt_ctrl || true); fi
+        if [ -z "$alt$alt_toggle" ]; then
+            key=Super+Alt+C
+            lines=$(summon_lines 'SUPER ALT')
+        else
+            if [ -n "$alt" ]; then warn "Super+Alt+C is taken too: $(printf '%s' "$alt" | head -n1 | sed 's/^\s*//')"; fi
+            if [ -n "$alt_toggle" ]; then warn "Super+Alt+Ctrl+C is taken too: $(printf '%s' "$alt_toggle" | head -n1 | sed 's/^\s*//')"; fi
+        fi
+    fi
+    if [ -n "$unknown" ]; then
+        warn "cannot determine Lua keys without live hyprctl binds -j (computed keys, aliases, loops or imports):"
+        printf '%s\n' "$unknown" | sed -n '1,5p' | sed 's/^/       /'
+        if [ "$(printf '%s\n' "$unknown" | wc -l)" -gt 5 ]; then info "more unresolved lines omitted; check the full config"; fi
+        info "nothing added automatically; check those keys, then add these with a free key (change any clashing keys named above):"
+        printf '%s\n' "$lines" | sed "s/^/       $D│$N /"
+        SUMMON="not bound (Lua keys need checking)"
+        return 0
+    fi
+    if [ -n "$clash$toggle" ] && [ "$key" = "$MOD_NAME+C" ]; then
         info "pick another key and add these to $(tilde "$WMCONF") with it:"
         printf '%s\n' "$lines" | sed "s/^/       $D│$N /"
-        SUMMON="not bound ($MOD_NAME+C is taken)"
+        SUMMON="not bound (summon or mic key is taken)"
+        return 0
+    fi
+    if [ ! -w "$WMCONF" ]; then
+        warn "$(tilde "$WMCONF") is read-only; add these to your own config with a free key:"
+        printf '%s\n' "$lines"
+        SUMMON="not bound (read-only config)"
         return 0
     fi
     if confirm "add the summon key ($key) to $(tilde "$WMCONF") (a backup first)"; then
-        block_put "$WMCONF" summon "$lines"
+        if ! block_put "$WMCONF" summon "$lines"; then
+            SUMMON="not bound (Lua syntax check failed)"
+            return 0
+        fi
         SUMMON="$key ($DESKTOP)" SUMMON_KEY=$key
         wm_reload
     else
@@ -1437,8 +1659,8 @@ step_autostart() {
     fi
     local cmd
     cmd=$(launch_cmd)
-    if [ -n "$WMCONF" ] && wm_grep 'synaps-avatar|capri-bin' | grep -Evq 'avatarctl|^\s*#'; then
-        good "your config already starts her: $(wm_grep 'synaps-avatar|capri-bin' | grep -Ev 'avatarctl|^\s*#' | head -n1 | sed 's/^\s*//')"
+    if [ -n "$WMCONF" ] && wm_grep 'synaps-avatar|capri-bin' | grep -Evq 'avatarctl|^\s*(#|--)'; then
+        good "your config already starts her: $(wm_grep 'synaps-avatar|capri-bin' | grep -Ev 'avatarctl|^\s*(#|--)' | head -n1 | sed 's/^\s*//')"
         AUTOSTART_HOW="your own"
         return 0
     fi
@@ -1454,12 +1676,26 @@ step_autostart() {
             case $DESKTOP in
                 i3) line="exec --no-startup-id $cmd" ;;
                 sway) line="exec $cmd" ;;
-                hyprland) line="exec-once = $cmd" ;;
+                hyprland)
+                    if hypr_lua; then
+                        line="hl.on(\"hyprland.start\", function() hl.exec_cmd($(lua_string "$cmd")) end)"
+                    else
+                        line="exec-once = $cmd"
+                    fi
+                    ;;
             esac
+            if [ ! -w "$WMCONF" ]; then
+                warn "$(tilde "$WMCONF") is read-only; add it to your own config: $line"
+                AUTOSTART_HOW="not set (read-only config)"
+                return 0
+            fi
             if confirm "start her at login from $(tilde "$WMCONF") (a backup first)"; then
                 info "she starts at login from your $DESKTOP config (--no-autostart to skip)"
-                block_put "$WMCONF" autostart "$line"
-                AUTOSTART_HOW="$DESKTOP config"
+                if block_put "$WMCONF" autostart "$line"; then
+                    AUTOSTART_HOW="$DESKTOP config"
+                else
+                    AUTOSTART_HOW="not set (Lua syntax check failed)"
+                fi
             else
                 info "add it yourself: $line"
                 AUTOSTART_HOW="not set (see above)"

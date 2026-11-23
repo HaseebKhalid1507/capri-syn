@@ -495,6 +495,11 @@ unset XDG_CURRENT_DESKTOP
 
 # Hyprland: its stock Super+C closes a window, so Super+Alt+C (Windows' key), when that's free.
 export CAPRI_DESKTOP=hyprland
+# Never query a real compositor from unit tests. Failed queries exercise the static fallback.
+hyprctl() {
+    [ "$*" = 'binds -j' ] && [ -n "${HYPR_TEST_BINDS:-}" ] || return 1
+    printf '%s\n' "$HYPR_TEST_BINDS"
+}
 mkdir -p "$CONF/hypr"
 hc=$CONF/hypr/hyprland.conf
 hypr() {
@@ -502,8 +507,9 @@ hypr() {
     SUMMON='' SUMMON_KEY=''
     step_summon >"$tmp/out" 2>&1
 }
-confirm() { echo "asked: $1"; return 0; }
+confirm() { echo "asked: $1"; return "${CONFIRM_RESULT:-0}"; }
 hypr 'bind = $mainMod, C, killactive,'
+check "$(grep -q 'Hyprland 0.57+ ignores it' "$tmp/out" && echo 0)" "legacy-only config warns that Hyprland 0.57 ignores it"
 check "$([ "$SUMMON_KEY" = Super+Alt+C ] && grep -qx "bind = SUPER ALT, C, exec, $BIN/avatarctl talk press" "$hc" &&
     grep -qx "bindr = SUPER ALT, C, exec, $BIN/avatarctl talk release" "$hc" && grep -qx 'bind = $mainMod, C, killactive,' "$hc" && echo 0)" \
     "Super+C taken (killactive): Super+Alt+C, his line kept"
@@ -514,7 +520,224 @@ case $(cat "$tmp/out") in *'Super+Alt+C is taken too: bind = $mainMod ALT, C, ex
 check "$([ $r = 0 ] && [ -z "$SUMMON_KEY" ] && ! grep -q avatarctl "$hc" && echo 0)" "both taken: nothing added, he picks one"
 hypr 'bind = $mainMod, X, killactive,'
 check "$([ "$SUMMON_KEY" = Super+C ] && grep -qx "bind = SUPER, C, exec, $BIN/avatarctl talk press" "$hc" && echo 0)" "Super+C free: Super+C, as before"
+VOICE=1 hypr 'bind = CTRL $mainMod, C, exec, his-command'
+check "$([ "$SUMMON_KEY" = Super+Alt+C ] && grep -q 'Super+Ctrl+C is taken' "$tmp/out" &&
+    grep -qx "bind = SUPER ALT CTRL, C, exec, $BIN/avatarctl talk toggle" "$hc" && echo 0)" "legacy --voice: Ctrl collision moves both chords to Alt"
+VOICE=1 hypr 'bind = SUPER, C, killactive,' 'bind = CTRL ALT $mainMod, C, exec, his-command'
+check "$([ -z "$SUMMON_KEY" ] && ! grep -q avatarctl "$hc" && grep -q 'Super+Alt+Ctrl+C is taken too' "$tmp/out" && echo 0)" "legacy --voice: fallback mic collision leaves config alone"
+HYPR_TEST_BINDS="[{\"modmask\":64,\"key\":\"C\",\"dispatcher\":\"exec\",\"arg\":\"$BIN/avatarctl talk press\"}, {\"modmask\":68,\"key\":\"C\",\"dispatcher\":\"exec\",\"arg\":\"$BIN/avatarctl talk toggle\"}]" \
+    VOICE=1 hypr '# reinstall'
+check "$([ "$SUMMON_KEY" = Super+C ] && echo 0)" "legacy: exact exec/arg self-skip retained"
 hypr 'bind = $mainMod, C, killactive,'
+
+# Hyprland 0.5x: the Lua config wins, including when both formats exist. Never evaluate his Lua.
+hl=$CONF/hypr/hyprland.lua
+cp "$hc" "$tmp/conf-before-lua"
+hypr_lua_config() {
+    printf '%s\n' 'local mainMod = "SUPER"' "$@" 'hl.bind(mainMod .. " + Q", hl.dsp.exec_cmd("kitty"))' >"$hl"
+    SUMMON='' SUMMON_KEY=''
+    step_summon >"$tmp/out" 2>&1
+}
+hypr_lua_config '-- hl.bind("SUPER + C", hl.dsp.no_op())'
+check "$([ "$WMCONF" = "$hl" ] && [ "$SUMMON_KEY" = Super+C ] && cmp -s "$hc" "$tmp/conf-before-lua" &&
+    grep -qxF "hl.bind(\"SUPER + C\", hl.dsp.exec_cmd(\"$BIN/avatarctl talk press\"), { description = \"synaps-avatar summon\" })" "$hl" &&
+    grep -qxF "hl.bind(\"SUPER + C\", hl.dsp.exec_cmd(\"$BIN/avatarctl talk release\"), { release = true, description = \"synaps-avatar summon\" })" "$hl" &&
+    ! grep -q 'talk toggle' "$hl" && echo 0)" "Lua preferred over .conf: literal Super+C press/release, comments ignored, no toggle without --voice"
+check "$(grep -qxF -- '-- >>> synaps-avatar (install.sh): summon >>>' "$hl" &&
+    grep -qxF -- '-- <<< synaps-avatar (install.sh): summon <<<' "$hl" &&
+    grep -qF 'block' "$RECEIPT" && echo 0)" "Lua uses the existing receipt/markers with Lua comments"
+check "$(cmp -s "$(find "$CONF/hypr" -name 'hyprland.lua.*.bak' | head -n1)" <(block_drop "$hl" summon) && echo 0)" "Lua: backup contains the original config"
+cp "$hl" "$tmp/lua-once"
+step_summon >"$tmp/out" 2>&1
+check "$(cmp -s "$hl" "$tmp/lua-once" && [ "$SUMMON_KEY" = Super+C ] && echo 0)" "Lua: reinstall ignores and replaces only her own block, without duplication"
+VOICE=1 hypr_lua_config 'local closeWindowBind = hl.bind(mainMod .. " + C", hl.dsp.window.close())'
+check "$([ "$SUMMON_KEY" = Super+Alt+C ] &&
+    grep -qxF "hl.bind(\"SUPER + ALT + CTRL + C\", hl.dsp.exec_cmd(\"$BIN/avatarctl talk toggle\"), { description = \"synaps-avatar summon\" })" "$hl" &&
+    grep -qxF 'local closeWindowBind = hl.bind(mainMod .. " + C", hl.dsp.window.close())' "$hl" && echo 0)" "Lua stock mainMod+C taken: Super+Alt+C, --voice adds Ctrl, his line kept"
+hypr_lua_config "hl.bind(' SUPER+c ', hl.dsp.no_op())" "hl.bind('alt + super + C', hl.dsp.no_op())"
+check "$([ -z "$SUMMON_KEY" ] && ! grep -q avatarctl "$hl" && grep -q 'Super+Alt+C is taken too' "$tmp/out" && echo 0)" "Lua: both literal keys taken (case/spacing/order/single quotes), neither overridden"
+hypr_lua_config 'hl.bind("WIN + C", hl.dsp.no_op())' 'hl.bind(mainMod .. " + ALT + C", hl.dsp.no_op())'
+check "$([ -z "$SUMMON_KEY" ] && ! grep -q avatarctl "$hl" && echo 0)" "Lua: mainMod+Alt+C fallback taken too"
+for alias in LOGO MOD4 META; do
+    hypr_lua_config "if true then hl.bind([[$alias + C]], hl.dsp.window.close()) end"
+    check "$([ "$SUMMON_KEY" = Super+Alt+C ] && echo 0)" "Lua: inline conditional, long string, $alias alias collision"
+done
+hypr_lua_config '--[=[' 'hl.bind("SUPER + C", hl.dsp.window.close())' ']=]' \
+    'local text = [[hl.bind("SUPER + C", not_code)]]' 'local other = 1 -- hl.bind("SUPER + C", not_code)'
+check "$([ "$SUMMON_KEY" = Super+C ] && echo 0)" "Lua: long comments, strings and trailing comments are not binds"
+for computed in 'hl.bind(key("C"), hl.dsp.window.close())' 'for _, k in ipairs(keys) do hl.bind(k, action) end' 'require("my-keys")' \
+    'local bind = hl.bind; bind("SUPER + C", action)' 'hl["bind"]("SUPER + C", action)'; do
+    hypr_lua_config "$computed"
+    check "$([ -z "$SUMMON_KEY" ] && ! grep -q avatarctl "$hl" && grep -qF "$computed" "$tmp/out" &&
+        grep -q 'cannot determine Lua keys without live hyprctl' "$tmp/out" && echo 0)" "Lua: unresolved keys/imports need a human without live binds: $computed"
+done
+HYPR_TEST_BINDS='[{"modmask":64,"key":"c","dispatcher":"killactive","arg":""}]' \
+    hypr_lua_config 'hl.bind(key("C"), hl.dsp.window.close())'
+check "$([ "$SUMMON_KEY" = Super+Alt+C ] && grep -q 'hyprctl:' "$tmp/out" && echo 0)" "Lua: live modmask/key catches helper collision"
+HYPR_TEST_BINDS='[{"modmask":64,"key":"C"},{"modmask":72,"key":"c"}]' \
+    hypr_lua_config 'require("my-keys")'
+check "$([ -z "$SUMMON_KEY" ] && ! grep -q avatarctl "$hl" && echo 0)" "Lua: live bindings protect both keys, including imported bindings"
+HYPR_TEST_BINDS='[{"modmask":64,"key":"","keycode":54},{"modmask":68,"key":"C"}]' \
+    hypr_lua_config 'hl.bind(key("C"), hl.dsp.window.close())'
+check "$([ "$SUMMON_KEY" = Super+Alt+C ] && echo 0)" "Lua: live keycode binding protects C, other modifiers don't claim Alt+C"
+HYPR_TEST_BINDS='[]' hypr_lua_config 'hl.bind("SUPER + C", hl.dsp.window.close())'
+check "$([ "$SUMMON_KEY" = Super+C ] && echo 0)" "Lua: live state is primary (a text binding can be disabled)"
+HYPR_TEST_BINDS='not JSON' hypr_lua_config 'local closeWindowBind = hl.bind(mainMod .. " + C", hl.dsp.window.close())'
+check "$([ "$SUMMON_KEY" = Super+Alt+C ] && echo 0)" "Lua: invalid hyprctl response falls back to text"
+HYPR_TEST_BINDS='[{"modmask":64,"key":"C","dispatcher":"HL.Dispatcher(exec_cmd)","arg":123,"description":"synaps-avatar summon"}, {"modmask":64,"key":"C","dispatcher":"HL.Dispatcher(exec_cmd)","arg":124,"release":true,"description":"synaps-avatar summon"}, {"modmask":68,"key":"C","dispatcher":"HL.Dispatcher(exec_cmd)","arg":125,"description":"synaps-avatar summon"}]' \
+    VOICE=1 hypr_lua_config '-- reinstall'
+check "$([ "$SUMMON_KEY" = Super+C ] && echo 0)" "Lua: live 0.57.2 installer bindings don't collide on reinstall"
+# Reconstruct the compositor's opaque Lua entries from each install, including descriptions.
+# Re-read after EVERY run, so a key flip (or missing tag) cannot hide behind a fixed JSON fixture.
+hypr_lua_live_snapshot() {
+    python3 - "$hl" "$1" <<'PYSNAPSHOT'
+import json, re, sys
+binds = json.loads(sys.argv[2])
+for line in open(sys.argv[1]):
+    if not re.search(r" talk (press|release|toggle)", line):
+        continue
+    keys = re.search(r'hl.bind\("([^"]+)"', line).group(1).split(" + ")
+    description = re.search(r'description = "([^"]+)"', line)
+    binds.append({"modmask": sum({"SUPER": 64, "ALT": 8, "CTRL": 4}[k] for k in keys[:-1]),
+                  "key": keys[-1], "dispatcher": "HL.Dispatcher(exec_cmd)", "arg": 100 + len(binds),
+                  "release": "release = true" in line,
+                  "description": description.group(1) if description else ""})
+print(json.dumps(binds))
+PYSNAPSHOT
+}
+for style in helpers stock; do
+    if [ "$style" = helpers ]; then
+        user_binds='[{"modmask":64,"key":"Q","dispatcher":"HL.Dispatcher(exec_cmd)","arg":90}]'
+        config='local function key(k) return "SUPER + " .. k end; hl.bind(key("Q"), hl.dsp.exec_cmd("kitty"))'
+        expected=Super+C
+    else
+        user_binds='[{"modmask":64,"key":"C","dispatcher":"HL.Dispatcher(window.close)","arg":91,"description":"Close window"}]'
+        config='local closeWindowBind = hl.bind(mainMod .. " + C", hl.dsp.window.close())'
+        expected=Super+Alt+C
+    fi
+    HYPR_TEST_BINDS=$user_binds VOICE=1 hypr_lua_config "$config"
+    cp "$hl" "$tmp/lua-stable"
+    check "$([ "$SUMMON_KEY" = "$expected" ] && [ "$(grep -c 'description = "synaps-avatar summon"' "$hl")" = 3 ] && echo 0)" "Lua $style: first install tags press, release and toggle"
+    for rerun in 1 2; do
+        live=$(hypr_lua_live_snapshot "$user_binds")
+        SUMMON='' SUMMON_KEY=''
+        HYPR_TEST_BINDS=$live VOICE=1 step_summon >"$tmp/out" 2>&1
+        check "$([ "$SUMMON_KEY" = "$expected" ] && cmp -s "$hl" "$tmp/lua-stable" && echo 0)" "Lua $style: live reinstall $rerun keeps $expected and identical config"
+    done
+done
+# Mic chords are checked with the summon chord; fall back as a pair, or leave BOTH untouched.
+VOICE=1 hypr_lua_config 'hl.bind("CONTROL + SUPER + C", hl.dsp.no_op())'
+check "$([ "$SUMMON_KEY" = Super+Alt+C ] && grep -q 'Super+Ctrl+C is taken' "$tmp/out" &&
+    grep -q 'SUPER + ALT + CTRL + C' "$hl" && echo 0)" "Lua --voice: offline Ctrl collision moves summon and mic to Alt"
+VOICE=1 hypr_lua_config 'hl.bind("SUPER + C", hl.dsp.no_op())' 'hl.bind("CTRL + ALT + SUPER + C", hl.dsp.no_op())'
+check "$([ -z "$SUMMON_KEY" ] && ! grep -q avatarctl "$hl" && grep -q 'Super+Alt+Ctrl+C is taken too' "$tmp/out" && echo 0)" "Lua --voice: offline fallback mic collision leaves config alone"
+for mask in 68 76; do
+    if [ "$mask" = 68 ]; then extra='' expected=Super+Alt+C; else extra=',{"modmask":64,"key":"C"}' expected=''; fi
+    HYPR_TEST_BINDS="[{\"modmask\":$mask,\"key\":\"C\",\"dispatcher\":\"HL.Dispatcher(exec_cmd)\",\"arg\":42,\"description\":\"His shortcut\"}$extra]" \
+        VOICE=1 hypr_lua_config 'require("my-keys")'
+    check "$([ "$SUMMON_KEY" = "$expected" ] && grep -q 'Ctrl+C is taken' "$tmp/out" && echo 0)" "Lua --voice: live mask $mask protects mic chord (not her description)"
+done
+HYPR_TEST_BINDS='[{"modmask":68,"key":"C"},{"modmask":76,"key":"C"}]' \
+    VOICE=1 hypr_lua_config '-- both mic chords taken'
+check "$([ -z "$SUMMON_KEY" ] && ! grep -q avatarctl "$hl" && echo 0)" "Lua --voice: both mic chords occupied, no conflicting binds written"
+hypr_lua_config 'hl.bind("SUPER + CTRL + C", hl.dsp.no_op())'
+check "$([ "$SUMMON_KEY" = Super+C ] && ! grep -q 'talk toggle' "$hl" && echo 0)" "Lua: mic collision irrelevant without --voice"
+# Offline stock still names its known collision, suggests Alt, and caps unresolved helper lines.
+helpers=()
+for i in {1..12}; do helpers+=("hl.bind(key$i(\"Q\"), action)"); done
+hypr_lua_config 'local closeWindowBind = hl.bind(mainMod .. " + C", hl.dsp.window.close())' "${helpers[@]}"
+check "$([ -z "$SUMMON_KEY" ] && ! grep -q avatarctl "$hl" && grep -q 'Super+C is taken: local closeWindowBind' "$tmp/out" &&
+    grep -q 'hl.bind("SUPER + ALT + C"' "$tmp/out" && ! grep -q 'hl.bind("SUPER + C"' "$tmp/out" &&
+    [ "$(grep -c 'hl.bind(key' "$tmp/out")" = 5 ] && grep -q 'more unresolved lines omitted' "$tmp/out" && echo 0)" "Lua offline stock: Alt example, known clash named, only five helper lines"
+# Hand-written block from bella, never claimed/removed by the installer.
+hypr_lua_config '-- >>> capri-syn summon >>>' \
+    "hl.bind(key(\"C\"), hl.dsp.exec_cmd(\"$BIN/capri-ctl talk press\"))" \
+    '-- <<< capri-syn summon <<<'
+check "$([ "$SUMMON" = 'your own binding' ] && ! grep -q 'synaps-avatar (install.sh)' "$hl" && echo 0)" "Lua: hand-written capri-syn summon block is already bound"
+hypr_lua_config 'local mainMod = "ALT"' 'hl.bind(mainMod .. " + C", hl.dsp.window.close())'
+check "$([ -z "$SUMMON_KEY" ] && grep -q 'cannot determine Lua keys' "$tmp/out" && echo 0)" "Lua: reassigned mainMod isn't assumed constant offline"
+# Search each Lua location before legacy conf, including XDG_CONFIG_DIRS then /etc/xdg.
+hypr_search_check() {
+    local HOME=$tmp/config-search/home CONF=$tmp/config-search/xdg XDG_CONFIG_DIRS=$tmp/config-search/system
+    local etc=$tmp/config-search/etc
+    mkdir -p "$CONF/hypr" "$HOME/.config/hypr" "$XDG_CONFIG_DIRS/hypr" "$etc/hypr"
+    touch "$CONF/hypr/hyprland.conf" "$etc/hypr/hyprland.lua"
+    [ "$(hypr_config "$etc")" = "$etc/hypr/hyprland.lua" ] || return 1
+    touch "$XDG_CONFIG_DIRS/hypr/hyprland.lua"
+    [ "$(hypr_config "$etc")" = "$XDG_CONFIG_DIRS/hypr/hyprland.lua" ] || return 1
+    touch "$HOME/.config/hypr/hyprland.lua"
+    [ "$(hypr_config "$etc")" = "$HOME/.config/hypr/hyprland.lua" ] || return 1
+    touch "$CONF/hypr/hyprland.lua"
+    [ "$(hypr_config "$etc")" = "$CONF/hypr/hyprland.lua" ]
+}
+hypr_search_check
+check $? "Lua: config search order XDG_CONFIG_HOME, HOME, XDG_CONFIG_DIRS, /etc/xdg, then .conf"
+printf '%s' 'local mainMod = "SUPER" -- no final newline' >"$hl"
+SUMMON='' SUMMON_KEY=''
+step_summon >"$tmp/out" 2>&1
+check "$([ "$SUMMON_KEY" = Super+C ] && grep -qxF -- '-- >>> synaps-avatar (install.sh): summon >>>' "$hl" && echo 0)" "Lua: missing final newline separated from marker"
+if command -v luac >/dev/null 2>&1; then
+    printf '%s\n' 'return {}' >"$hl"
+    cp "$hl" "$tmp/lua-return"
+    receipt_before=$(cat "$RECEIPT")
+    SUMMON='' SUMMON_KEY=''
+    step_summon >"$tmp/out" 2>&1
+    check "$(cmp -s "$hl" "$tmp/lua-return" && [ -z "$SUMMON_KEY" ] &&
+        [ "$(cat "$RECEIPT")" = "$receipt_before" ] && grep -q 'Lua syntax check failed; restored' "$tmp/out" && echo 0)" "Lua: top-level return restores pre-edit backup, no binding/receipt claimed"
+fi
+(
+    # An older luac cannot judge the compositor's newer Lua syntax. Never run the post-check
+    # if it rejects the original; this stand-in must be called once, before the new block exists.
+    # shellcheck disable=SC2317,SC2329 # block_put calls this indirectly
+    luac() { grep -q 'synaps-avatar (install.sh)' "$2" && echo after >>"$tmp/luac-calls"; echo before >>"$tmp/luac-calls"; return 1; }
+    : >"$tmp/luac-calls"
+    hypr_lua_config '-- syntax newer than local luac'
+    [ "$SUMMON_KEY" = Super+C ] && [ "$(cat "$tmp/luac-calls")" = before ] &&
+        grep -q 'skipping its syntax check' "$tmp/out" && ! grep -q 'restored' "$tmp/out"
+)
+check $? "Lua: unsupported original skips post-check instead of misleading rollback"
+CONFIRM_RESULT=1 hypr_lua_config '-- his config'
+check "$([ -z "$SUMMON_KEY" ] && ! grep -q avatarctl "$hl" && grep -q 'hl.bind("SUPER + C"' "$tmp/out" && echo 0)" "Lua: no consent, only shows valid Lua to add himself"
+DRY=1 hypr_lua_config '-- his config'
+check "$(! grep -q avatarctl "$hl" && echo 0)" "Lua: dry run leaves config alone"
+hypr_lua_config "hl.bind(\"SUPER + X\", hl.dsp.exec_cmd(\"$BIN/avatarctl talk press\"))"
+check "$([ "$SUMMON" = 'your own binding' ] && ! grep -q 'synaps-avatar (install.sh)' "$hl" && echo 0)" "Lua: his own summon binding is kept"
+# Path quoting: a shell-quoted executable inside a Lua-quoted command, not executable Lua.
+old_bin=$BIN
+BIN="$tmp/My \"Apps\"/back\\slash"
+VOICE=1 hypr_lua_config '-- his config'
+check "$(grep -qxF "hl.bind(\"SUPER + CTRL + C\", hl.dsp.exec_cmd($(lua_string "$(q "$BIN/avatarctl") talk toggle")), { description = \"synaps-avatar summon\" })" "$hl" && echo 0)" "Lua: spaces, quotes and backslashes in the binary path escaped"
+BIN=$old_bin
+# Changing WMCONF also affects autostart: don't append exec-once (invalid Lua) after good binds.
+step_autostart >"$tmp/out" 2>&1
+check "$(grep -qF 'hl.on("hyprland.start", function() hl.exec_cmd(' "$hl" &&
+    ! grep -q '^exec-once' "$hl" && [ -z "$(wm_grep 'hyprland.start' || true)" ] && echo 0)" "Lua: autostart uses the startup event, both marker blocks excluded from scans"
+if command -v lua >/dev/null 2>&1; then
+    lua - "$hl" <<'LUA'
+local commands, releases, starts = {}, 0, 0
+local started
+hl = { dsp = { exec_cmd = function(cmd) return cmd end }, exec_cmd = function(cmd) started = cmd end }
+hl.bind = function(keys, cmd, opts)
+    assert(not keys:find("key(", 1, true))
+    table.insert(commands, cmd)
+    if cmd:find(" talk ", 1, true) then assert(opts.description == "synaps-avatar summon") end
+    if opts and opts.release then releases = releases + 1 end
+end
+hl.on = function(event, callback) assert(event == "hyprland.start"); starts = starts + 1; callback() end
+assert(loadfile(arg[1]))()
+assert(#commands == 4 and releases == 1 and starts == 1)
+assert(started and started:find("synaps-avatar", 1, true))
+assert(commands[2]:find('My "Apps"/back\\slash/avatarctl', 1, true))
+LUA
+    check $? "Lua: generated config parses and dispatches with exact path bytes on a stub API, autostart callback runs"
+else
+    check 1 "Lua parse/runtime tests require lua (install lua5.4)"
+fi
+if ! command -v luac >/dev/null 2>&1; then
+    check 1 "Lua syntax/rollback tests require luac (install lua5.4)"
+fi
+hypr_lua_config 'hl.bind("SUPER + C", hl.dsp.no_op())'
+step_autostart >"$tmp/out" 2>&1
 unset CAPRI_DESKTOP
 
 # --uninstall: the app-menu and autostart entries, her GNOME shortcut (his stays), her Hyprland block.
@@ -524,6 +747,8 @@ uninstall >"$tmp/out" 2>&1
 GS_LOST=0
 check "$([ ! -e "$app" ] && [ ! -e "$CONF/autostart/synaps-avatar.desktop" ] && echo 0)" "--uninstall: both desktop entries gone"
 check "$(! grep -q avatarctl "$hc" && grep -qx 'bind = $mainMod, C, killactive,' "$hc" && echo 0)" "her Hyprland block out, his lines kept"
+check "$(! grep -qE 'avatarctl|hyprland.start|synaps-avatar \(install.sh\)' "$hl" &&
+    grep -qxF 'hl.bind("SUPER + C", hl.dsp.no_op())' "$hl" && echo 0)" "--uninstall: Lua summon/autostart blocks removed via receipt, his lines kept"
 case $(cat "$tmp/out") in
     *"didn't take her GNOME shortcut out"*"custom-keybindings '[\"$C0\"]'"*"reset-recursively $GSCHEMA.custom-keybinding:$GKEY"*'kept in the receipt'*) r=0 ;;
     *) r=1 ;;
