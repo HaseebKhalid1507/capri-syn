@@ -392,9 +392,12 @@ mod shell_overlay {
         ls
     }
 
+    /// x intervals, root px.
+    type Spans = Vec<(i32, i32)>;
+
     /// The exposed spans of the top edge of the window whose left edge is at `x`, and the seat
     /// ranges on them: what `Avatar::perch` finds.
-    fn edge(s: &Snap, x: i32) -> (Vec<(i32, i32)>, Vec<(i32, i32)>) {
+    fn edge(s: &Snap, x: i32) -> (Spans, Spans) {
         let stack = s.stack(&mut Ids::default());
         let rects: Vec<WinRect> = stack.iter().map(|w| w.rect).collect();
         let i = stack.iter().position(|w| w.managed && w.rect.x == x).expect("the window is in the stack");
