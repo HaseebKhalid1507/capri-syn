@@ -9,6 +9,8 @@ mod brainview;
 mod ragview;
 #[path = "lineview.rs"]
 mod lineview;
+#[path = "line_height.rs"]
+pub(crate) mod line_height;
 #[path = "voiceview.rs"]
 mod voiceview;
 #[path = "arriveview.rs"]

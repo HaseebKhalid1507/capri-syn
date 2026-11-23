@@ -215,9 +215,10 @@ she runs through XWayland, the X server those desktops keep for X apps.
 - **Hyprland** has no idle time for her yet: your presence is the pointer moving, so typing alone
   for 5 min reads as away. Hyprland before 0.40 isn't supported: she takes XWayland there.
 - **Hyprland: the Line and Settings could open cut short in 1.2.0 and earlier**, with no room
-  to type ([#145](https://github.com/HaseebKhalid1507/capri-syn/issues/145)). Fixed after 1.2.0:
-  their layer surface now follows the measured content height. No `windowrule` or config edit
-  is needed; both pages use the same overlay layer, not a tiled window.
+  to type ([#145](https://github.com/HaseebKhalid1507/capri-syn/issues/145)). **Fixed after 1.2.0,
+  pending confirmation on Hyprland:** their layer surface now follows the measured content
+  height and placement width (previously frozen at opening width). No `windowrule` or config
+  edit is needed; both pages use the same overlay layer, not a tiled window.
 - **On Windows, Synaps 0.12's own `synaps login`** opens a sign-in tab cut at the URL's first `&`:
   copy the whole URL it prints into your browser, or sign in from her (Settings ▸ Brain) or through
   her installers' step, which open it whole (install.ps1 puts it there too; the default folder

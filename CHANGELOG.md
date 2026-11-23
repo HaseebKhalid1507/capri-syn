@@ -11,7 +11,9 @@
   doesn't say which layers take the keyboard.
 - **Hyprland: the Line and Settings grow to fit their contents** instead of staying at their
   initial 120 px height with the input field or Settings rows cut off (#145). They remain overlay
-  layer surfaces, never tiled; no Hyprland config changes are needed.
+  layer surfaces, never tiled; no Hyprland config changes are needed. The Line's width also
+  follows placement instead of freezing at its opening width. **Fixed, pending confirmation
+  on Hyprland.** Reader/effect-host placement is unchanged.
 
 ## 1.2.0 (2026-11-23)
 
