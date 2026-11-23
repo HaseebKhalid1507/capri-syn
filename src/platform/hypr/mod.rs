@@ -119,6 +119,21 @@ impl Snap {
     fn special(&self, c: &HClient) -> bool {
         self.mons.iter().any(|m| m.special_workspace.id != 0 && m.special_workspace.id == c.workspace.id)
     }
+
+    /// Bottom → top per monitor: tiled clients, floating ones oldest focus first, fullscreen;
+    /// the open special workspace above; then other clients' top and overlay layers that
+    /// `occludes` (bars, notifications: they cover windows but nobody sits on them).
+    fn stack(&self, ids: &mut Ids) -> Vec<Win> {
+        let mut cs: Vec<&HClient> = self.clients.iter().filter(|c| self.visible(c) && !ours(&c.class)).collect();
+        cs.sort_by_key(|c| (self.special(c), c.fullscreen & 2 != 0, c.floating, -c.focus_history_id));
+        let mut out: Vec<Win> = cs.iter().map(|c| Win { rect: WinRect { id: ids.client(&c.address, &c.stable_id), x: c.at[0], y: c.at[1], w: c.size[0], h: c.size[1] }, managed: true }).collect();
+        // The output a layer is on (its logical size), by the name `hyprctl layers` files it under.
+        let output = |name: &str| self.mons.iter().find(|m| m.name == name).map(|m| m.monitor(false)).map(|m| (m.w, m.h));
+        let mut ls: Vec<&(String, u8, HLayer)> = self.layers.iter().filter(|(mon, lvl, l)| *lvl >= 2 && !ours(&l.namespace) && occludes(l, output(mon))).collect();
+        ls.sort_by_key(|(_, lvl, _)| *lvl);
+        out.extend(ls.iter().map(|(_, _, l)| Win { rect: WinRect { id: ids.id(&l.address), x: l.x, y: l.y, w: l.w, h: l.h }, managed: false }));
+        out
+    }
 }
 
 /// A client's identity: its stable id (its address where there is none).
@@ -149,6 +164,12 @@ impl Ids {
     fn key(&self, id: WinId) -> Option<&str> {
         self.keys.get((id as usize).checked_sub(2)?).map(String::as_str)
     }
+    /// A client's id (and its address noted).
+    fn client(&mut self, address: &str, stable: &str) -> WinId {
+        let id = self.id(&client_key(address, stable));
+        self.addr.insert(id, address.to_string());
+        id
+    }
 }
 
 pub struct HyprDesktop {
@@ -160,6 +181,31 @@ pub struct HyprDesktop {
 
 fn ours(ns_or_class: &str) -> bool {
     ns_or_class.starts_with(NS_PREFIX)
+}
+
+/// A layer this thin (px, either way) or thinner draws nothing to sit under: hot-edge triggers,
+/// caelestia's 1x1 border-exclusion and quickshell probes.
+const SLIVER: i32 = 2;
+/// A layer this much of its output (percent), both ways, is the shell's canvas.
+const CANVAS_PCT: i64 = 90;
+
+/// Whether another client's top or overlay layer `l`, on an output of `output` logical px (None:
+/// unknown), covers the windows under it. `hyprctl layers` reports geometry only, never what is
+/// drawn or where clicks land, so the rule goes by size:
+/// - A sliver (`SLIVER`) never does.
+/// - A layer that is (nearly) its whole output (`CANVAS_PCT` of it both ways) never does: shells
+///   like caelestia, quickshell, ags and eww draw their bar, drawers and popups on one transparent,
+///   mostly click-through layer the size of the output, so counting it hid every window on that
+///   output (`edge hidden ... exposed []` for each). A surface anchored on all four edges without
+///   an exclusive zone of its own gets the output less the other layers' reserved edges (caelestia
+///   reserves 70 of 2560 and 20 of 1600: 97% and 99% left), and a fractional scale rounds the
+///   output's size; both stay well inside 90. A bar, dock, side panel or notification is long one
+///   way only and thin the other, so it is nowhere near: even a half-screen sidebar still counts.
+///   The price: an opaque layer this big (a launcher's dimmer) lets her sit on what it hides.
+/// - Anything else does.
+fn occludes(l: &HLayer, output: Option<(i32, i32)>) -> bool {
+    let share = |part: i32, whole: i32| i64::from(part) * 100 >= i64::from(whole) * CANVAS_PCT;
+    l.w > SLIVER && l.h > SLIVER && !output.is_some_and(|(w, h)| w > 0 && h > 0 && share(l.w, w) && share(l.h, h))
 }
 
 impl HyprDesktop {
@@ -192,10 +238,7 @@ impl HyprDesktop {
 
     /// A client's id (and its address noted).
     fn client_id(&self, address: &str, stable: &str) -> WinId {
-        let Ok(mut ids) = self.ids.lock() else { return 0 };
-        let id = ids.id(&client_key(address, stable));
-        ids.addr.insert(id, address.to_string());
-        id
+        self.ids.lock().map(|mut i| i.client(address, stable)).unwrap_or(0)
     }
 
     /// The client a JSON reply describes (`j/activewindow`).
@@ -277,18 +320,11 @@ impl Desktop for HyprDesktop {
         self.mons().iter().find(|m| m.monitor(false).contains(x, y)).map(|m| m.refresh_rate)
     }
 
-    /// Bottom → top per monitor: tiled clients, floating ones oldest focus first, fullscreen;
-    /// the open special workspace above; then other clients' top and overlay layers (bars,
-    /// notifications: they cover windows but nobody sits on them).
+    /// Every visible window and the layers over them (`Snap::stack`), bottom → top.
     fn windows(&self) -> Vec<Win> {
         let Ok(s) = self.snap() else { return Vec::new() };
-        let mut cs: Vec<&HClient> = s.clients.iter().filter(|c| s.visible(c) && !ours(&c.class)).collect();
-        cs.sort_by_key(|c| (s.special(c), c.fullscreen & 2 != 0, c.floating, -c.focus_history_id));
-        let mut out: Vec<Win> = cs.iter().map(|c| Win { rect: WinRect { id: self.client_id(&c.address, &c.stable_id), x: c.at[0], y: c.at[1], w: c.size[0], h: c.size[1] }, managed: true }).collect();
-        let mut ls: Vec<&(String, u8, HLayer)> = s.layers.iter().filter(|(_, lvl, l)| *lvl >= 2 && !ours(&l.namespace) && l.w > 0 && l.h > 0).collect();
-        ls.sort_by_key(|(_, lvl, _)| *lvl);
-        out.extend(ls.iter().map(|(_, _, l)| Win { rect: WinRect { id: self.id(&l.address), x: l.x, y: l.y, w: l.w, h: l.h }, managed: false }));
-        out
+        let Ok(mut ids) = self.ids.lock() else { return Vec::new() };
+        s.stack(&mut ids)
     }
 
     fn active_window(&self) -> Option<WinId> {
