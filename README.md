@@ -373,7 +373,13 @@ The session rules, flags, packs and the dev control: [docs/REFERENCE.md](docs/RE
 | <kbd>Tab</kbd> | Answer in words instead |
 
 On Linux the app grabs no global keys; the installer binds them for i3, sway and Hyprland (with your
-consent). By hand, in i3:
+consent). On Hyprland it prefers `~/.config/hypr/hyprland.lua` when present, otherwise
+`hyprland.conf`: Lua gets `hl.bind` press/release bindings with literal key strings, not local
+helpers. Super+C taken? It offers Super+Alt+C; `--voice` adds Ctrl for the mic toggle. It backs up
+the config first and removes only its marked blocks on uninstall. Lua collision checks cover
+literal keys and the stock `mainMod` concatenation, not arbitrary Lua helpers.
+
+By hand, in i3:
 
 ```
 bindsym $mod+c             exec --no-startup-id avatarctl talk press

@@ -515,6 +515,71 @@ check "$([ $r = 0 ] && [ -z "$SUMMON_KEY" ] && ! grep -q avatarctl "$hc" && echo
 hypr 'bind = $mainMod, X, killactive,'
 check "$([ "$SUMMON_KEY" = Super+C ] && grep -qx "bind = SUPER, C, exec, $BIN/avatarctl talk press" "$hc" && echo 0)" "Super+C free: Super+C, as before"
 hypr 'bind = $mainMod, C, killactive,'
+
+# Hyprland 0.5x: the Lua config wins, including when both formats exist. Never evaluate his Lua.
+hl=$CONF/hypr/hyprland.lua
+cp "$hc" "$tmp/conf-before-lua"
+hypr_lua_config() {
+    printf '%s\n' 'local mainMod = "SUPER"' "$@" 'hl.bind(mainMod .. " + Q", hl.dsp.exec_cmd("kitty"))' >"$hl"
+    SUMMON='' SUMMON_KEY=''
+    step_summon >"$tmp/out" 2>&1
+}
+hypr_lua_config '-- hl.bind("SUPER + C", hl.dsp.no_op())'
+check "$([ "$WMCONF" = "$hl" ] && [ "$SUMMON_KEY" = Super+C ] && cmp -s "$hc" "$tmp/conf-before-lua" &&
+    grep -qxF "hl.bind(\"SUPER + C\", hl.dsp.exec_cmd(\"$BIN/avatarctl talk press\"))" "$hl" &&
+    grep -qxF "hl.bind(\"SUPER + C\", hl.dsp.exec_cmd(\"$BIN/avatarctl talk release\"), { release = true })" "$hl" &&
+    ! grep -q 'talk toggle' "$hl" && echo 0)" "Lua preferred over .conf: literal Super+C press/release, comments ignored, no toggle without --voice"
+check "$(grep -qxF -- '-- >>> synaps-avatar (install.sh): summon >>>' "$hl" &&
+    grep -qxF -- '-- <<< synaps-avatar (install.sh): summon <<<' "$hl" &&
+    grep -qF 'block' "$RECEIPT" && echo 0)" "Lua uses the existing receipt/markers with Lua comments"
+check "$(cmp -s "$(find "$CONF/hypr" -name 'hyprland.lua.*.bak' | head -n1)" <(block_drop "$hl" summon) && echo 0)" "Lua: backup contains the original config"
+cp "$hl" "$tmp/lua-once"
+step_summon >"$tmp/out" 2>&1
+check "$(cmp -s "$hl" "$tmp/lua-once" && [ "$SUMMON_KEY" = Super+C ] && echo 0)" "Lua: reinstall ignores and replaces only her own block, without duplication"
+VOICE=1 hypr_lua_config 'hl.bind(mainMod .. " + C", hl.dsp.no_op())'
+check "$([ "$SUMMON_KEY" = Super+Alt+C ] &&
+    grep -qxF "hl.bind(\"SUPER + ALT + CTRL + C\", hl.dsp.exec_cmd(\"$BIN/avatarctl talk toggle\"))" "$hl" &&
+    grep -qxF 'hl.bind(mainMod .. " + C", hl.dsp.no_op())' "$hl" && echo 0)" "Lua stock mainMod+C taken: Super+Alt+C, --voice adds Ctrl, his line kept"
+hypr_lua_config "hl.bind(' SUPER+c ', hl.dsp.no_op())" "hl.bind('alt + super + C', hl.dsp.no_op())"
+check "$([ -z "$SUMMON_KEY" ] && ! grep -q avatarctl "$hl" && grep -q 'Super+Alt+C is taken too' "$tmp/out" && echo 0)" "Lua: both literal keys taken (case/spacing/order/single quotes), neither overridden"
+hypr_lua_config 'hl.bind("WIN + C", hl.dsp.no_op())' 'hl.bind(mainMod .. " + ALT + C", hl.dsp.no_op())'
+check "$([ -z "$SUMMON_KEY" ] && ! grep -q avatarctl "$hl" && echo 0)" "Lua: mainMod+Alt+C fallback taken too"
+confirm() { echo "asked: $1"; return 1; }
+hypr_lua_config '-- his config'
+check "$([ -z "$SUMMON_KEY" ] && ! grep -q avatarctl "$hl" && grep -q 'hl.bind("SUPER + C"' "$tmp/out" && echo 0)" "Lua: no consent, only shows valid Lua to add himself"
+confirm() { echo "asked: $1"; return 0; }
+DRY=1 hypr_lua_config '-- his config'
+check "$(! grep -q avatarctl "$hl" && echo 0)" "Lua: dry run leaves config alone"
+hypr_lua_config "hl.bind(\"SUPER + X\", hl.dsp.exec_cmd(\"$BIN/avatarctl talk press\"))"
+check "$([ "$SUMMON" = 'your own binding' ] && ! grep -q 'synaps-avatar (install.sh)' "$hl" && echo 0)" "Lua: his own summon binding is kept"
+# Path quoting: a shell-quoted executable inside a Lua-quoted command, not executable Lua.
+old_bin=$BIN
+BIN="$tmp/My \"Apps\"/back\\slash"
+VOICE=1 hypr_lua_config '-- his config'
+check "$(grep -qxF "hl.bind(\"SUPER + CTRL + C\", hl.dsp.exec_cmd($(lua_string "$(q "$BIN/avatarctl") talk toggle")))" "$hl" && echo 0)" "Lua: spaces, quotes and backslashes in the binary path escaped"
+BIN=$old_bin
+# Changing WMCONF also affects autostart: don't append exec-once (invalid Lua) after good binds.
+step_autostart >"$tmp/out" 2>&1
+check "$(grep -qF 'hl.on("hyprland.start", function() hl.exec_cmd(' "$hl" &&
+    ! grep -q '^exec-once' "$hl" && [ -z "$(wm_grep 'hyprland.start' || true)" ] && echo 0)" "Lua: autostart uses the startup event, both marker blocks excluded from scans"
+if command -v lua >/dev/null 2>&1; then
+    lua - "$hl" <<'LUA'
+local commands, releases, starts = {}, 0, 0
+hl = { dsp = { exec_cmd = function(cmd) return cmd end }, exec_cmd = function() end }
+hl.bind = function(keys, cmd, opts)
+    assert(not keys:find("key("))
+    table.insert(commands, cmd)
+    if opts and opts.release then releases = releases + 1 end
+end
+hl.on = function(event, callback) assert(event == "hyprland.start"); starts = starts + 1 end
+assert(loadfile(arg[1]))()
+assert(#commands == 4 and releases == 1 and starts == 1)
+assert(commands[2]:find('My "Apps"/back\\slash/avatarctl', 1, true))
+LUA
+    check $? "Lua: generated config parses and dispatches with exact path bytes on a stub API"
+fi
+hypr_lua_config 'hl.bind("SUPER + C", hl.dsp.no_op())'
+step_autostart >"$tmp/out" 2>&1
 unset CAPRI_DESKTOP
 
 # --uninstall: the app-menu and autostart entries, her GNOME shortcut (his stays), her Hyprland block.
@@ -524,6 +589,8 @@ uninstall >"$tmp/out" 2>&1
 GS_LOST=0
 check "$([ ! -e "$app" ] && [ ! -e "$CONF/autostart/synaps-avatar.desktop" ] && echo 0)" "--uninstall: both desktop entries gone"
 check "$(! grep -q avatarctl "$hc" && grep -qx 'bind = $mainMod, C, killactive,' "$hc" && echo 0)" "her Hyprland block out, his lines kept"
+check "$(! grep -qE 'avatarctl|hyprland.start|synaps-avatar \(install.sh\)' "$hl" &&
+    grep -qxF 'hl.bind("SUPER + C", hl.dsp.no_op())' "$hl" && echo 0)" "--uninstall: Lua summon/autostart blocks removed via receipt, his lines kept"
 case $(cat "$tmp/out") in
     *"didn't take her GNOME shortcut out"*"custom-keybindings '[\"$C0\"]'"*"reset-recursively $GSCHEMA.custom-keybinding:$GKEY"*'kept in the receipt'*) r=0 ;;
     *) r=1 ;;

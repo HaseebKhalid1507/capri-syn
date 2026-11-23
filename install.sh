@@ -256,9 +256,13 @@ receipt_init() {
 
 # ---- marked blocks in someone else's config file ----------------------------------------------
 
-bmark() { printf '# %s synaps-avatar (install.sh): %s %s' "$1" "$2" "$1"; }
-block_get() { sed -n "/^$(bmark '>>>' "$2")\$/,/^$(bmark '<<<' "$2")\$/p" "$1" 2>/dev/null | sed '1d;$d'; }
-block_drop() { sed "/^$(bmark '>>>' "$2")\$/,/^$(bmark '<<<' "$2")\$/d" "$1"; }
+bmark() {
+    local comment='#'
+    case ${3:-} in *.lua) comment='--' ;; esac
+    printf '%s %s synaps-avatar (install.sh): %s %s' "$comment" "$1" "$2" "$1"
+}
+block_get() { sed -n "/^$(bmark '>>>' "$2" "${3:-$1}")\$/,/^$(bmark '<<<' "$2" "${3:-$1}")\$/p" "$1" 2>/dev/null | sed '1d;$d'; }
+block_drop() { sed "/^$(bmark '>>>' "$2" "${3:-$1}")\$/,/^$(bmark '<<<' "$2" "${3:-$1}")\$/d" "$1"; }
 # One backup per file per run, before its first change: the file as it was.
 BACKED_UP=''
 backup() {
@@ -293,16 +297,16 @@ block_put() {
     [ "$DRY" = 1 ] && return 0
     {
         block_drop "$f" "$tag"
-        bmark '>>>' "$tag"
+        bmark '>>>' "$tag" "$f"
         printf '\n%s\n' "$body"
-        bmark '<<<' "$tag"
+        bmark '<<<' "$tag" "$f"
         printf '\n'
     } >"$TMP/block"
     block_write "$f"
 }
 block_rm() {
     local f=$1 tag=$2
-    [ -f "$f" ] && grep -qxF "$(bmark '>>>' "$tag")" "$f" || return 0
+    [ -f "$f" ] && grep -qxF -- "$(bmark '>>>' "$tag" "$f")" "$f" || return 0
     if [ -z "$(block_drop "$f" "$tag" | tr -d '[:space:]')" ]; then
         warn "$(tilde "$f") would be empty without her block ($tag): left as it is (take it out by hand)"
         return 0
@@ -1057,13 +1061,13 @@ desktop() {
     case $DESKTOP in
         i3) WMCONF=$(first_file "$CONF/i3/config" "$HOME/.i3/config") ;;
         sway) WMCONF=$(first_file "$CONF/sway/config" "$HOME/.sway/config") ;;
-        hyprland) WMCONF=$(first_file "$CONF/hypr/hyprland.conf") ;;
+        hyprland) WMCONF=$(first_file "$CONF/hypr/hyprland.lua" "$CONF/hypr/hyprland.conf") ;;
         *) WMCONF='' ;;
     esac
 }
 
 # Lines in WMCONF, outside our blocks, that match a regex.
-wm_grep() { [ -n "$WMCONF" ] && block_drop "$WMCONF" summon | block_drop /dev/stdin autostart | grep -Ei -- "$1"; }
+wm_grep() { [ -n "$WMCONF" ] && block_drop "$WMCONF" summon | block_drop /dev/stdin autostart "$WMCONF" | grep -Ei -- "$1"; }
 
 # The summon key's modifier: MOD_WORD as the lines write it ($mod when the config sets one),
 # MOD_RAW its value, MOD_NAME what he presses (Super, Alt...).
@@ -1083,6 +1087,34 @@ wm_mod() {
     esac
 }
 
+# A Lua string containing a shell command (shell quoting and Lua quoting are separate layers).
+lua_string() {
+    local s=${1//\\/\\\\}
+    s=${s//\"/\\\"}
+    s=${s//$'\n'/\\n} s=${s//$'\r'/\\r} s=${s//$'\t'/\\t}
+    printf '"%s"' "$s"
+}
+hypr_lua() { [[ $WMCONF == *.lua ]]; }
+# Static config checks, like the .conf path: literal keys and the stock mainMod concatenation.
+# Arbitrary Lua helpers aren't evaluated by the installer.
+hypr_taken() {
+    local mod='(super|win)' var='(mainmod|mod)' key='c' expr
+    if ! hypr_lua; then
+        if [ "$1" = alt ]; then
+            wm_grep '^\s*bind[a-z]*\s*=\s*((\$mainmod|\$mod|super|win)[ _]*alt|alt[ _]*(\$mainmod|\$mod|super|win))\s*,\s*c\s*,'
+        else
+            wm_grep '^\s*bind[a-z]*\s*=\s*(\$mainmod|\$mod|super)\s*,\s*c\s*,'
+        fi
+        return
+    fi
+    if [ "$1" = alt ]; then
+        mod="($mod\s*\+\s*alt|alt\s*\+\s*$mod)"
+        key='alt\s*\+\s*c'
+    fi
+    expr="[\"']\s*$mod\s*\+\s*c\s*[\"']|$var\s*\.\.\s*[\"']\s*\+\s*$key\s*[\"']"
+    wm_grep "^\s*hl\.bind\s*\(\s*($expr)\s*,"
+}
+
 # Her key's lines for his WM config. Hyprland: $1 its modifiers (SUPER, or SUPER ALT when Super+C is taken).
 summon_lines() {
     local ctl hm=${1:-SUPER}
@@ -1094,9 +1126,16 @@ summon_lines() {
             if [ "$VOICE" = 1 ]; then printf '\nbindsym %s+Ctrl+c exec --no-startup-id %s talk toggle' "$MOD_WORD" "$ctl"; fi
             ;;
         hyprland)
-            printf 'bind = %s, C, exec, %s talk press\n' "$hm" "$ctl"
-            printf 'bindr = %s, C, exec, %s talk release' "$hm" "$ctl"
-            if [ "$VOICE" = 1 ]; then printf '\nbind = %s CTRL, C, exec, %s talk toggle' "$hm" "$ctl"; fi
+            if hypr_lua; then
+                hm=${hm// / + }
+                printf 'hl.bind("%s + C", hl.dsp.exec_cmd(%s))\n' "$hm" "$(lua_string "$ctl talk press")"
+                printf 'hl.bind("%s + C", hl.dsp.exec_cmd(%s), { release = true })' "$hm" "$(lua_string "$ctl talk release")"
+                if [ "$VOICE" = 1 ]; then printf '\nhl.bind("%s + CTRL + C", hl.dsp.exec_cmd(%s))' "$hm" "$(lua_string "$ctl talk toggle")"; fi
+            else
+                printf 'bind = %s, C, exec, %s talk press\n' "$hm" "$ctl"
+                printf 'bindr = %s, C, exec, %s talk release' "$hm" "$ctl"
+                if [ "$VOICE" = 1 ]; then printf '\nbind = %s CTRL, C, exec, %s talk toggle' "$hm" "$ctl"; fi
+            fi
             ;;
     esac
     return 0
@@ -1139,13 +1178,13 @@ step_summon() {
     local clash alt key=$MOD_NAME+C
     case $DESKTOP in
         i3 | sway) clash=$(wm_grep "^\\s*bindsym\\s+(--\\S+\\s+)*(\\\$mod|$MOD_RAW)\\+c\\s" || true) ;;
-        hyprland) clash=$(wm_grep '^\s*bind[a-z]*\s*=\s*(\$mainmod|\$mod|super)\s*,\s*c\s*,' || true) ;;
+        hyprland) clash=$(hypr_taken super || true) ;;
     esac
     if [ -n "$clash" ]; then
         warn "$MOD_NAME+C is taken: $(printf '%s' "$clash" | head -n1 | sed 's/^\s*//')"
         # Hyprland's stock config closes a window on Super+C: Super+Alt+C then (Windows' key), if it's free.
         if [ "$DESKTOP" = hyprland ]; then
-            alt=$(wm_grep '^\s*bind[a-z]*\s*=\s*((\$mainmod|\$mod|super|win)[ _]*alt|alt[ _]*(\$mainmod|\$mod|super|win))\s*,\s*c\s*,' || true)
+            alt=$(hypr_taken alt || true)
             if [ -z "$alt" ]; then
                 key=Super+Alt+C
                 lines=$(summon_lines 'SUPER ALT')
@@ -1437,8 +1476,8 @@ step_autostart() {
     fi
     local cmd
     cmd=$(launch_cmd)
-    if [ -n "$WMCONF" ] && wm_grep 'synaps-avatar|capri-bin' | grep -Evq 'avatarctl|^\s*#'; then
-        good "your config already starts her: $(wm_grep 'synaps-avatar|capri-bin' | grep -Ev 'avatarctl|^\s*#' | head -n1 | sed 's/^\s*//')"
+    if [ -n "$WMCONF" ] && wm_grep 'synaps-avatar|capri-bin' | grep -Evq 'avatarctl|^\s*(#|--)'; then
+        good "your config already starts her: $(wm_grep 'synaps-avatar|capri-bin' | grep -Ev 'avatarctl|^\s*(#|--)' | head -n1 | sed 's/^\s*//')"
         AUTOSTART_HOW="your own"
         return 0
     fi
@@ -1454,7 +1493,13 @@ step_autostart() {
             case $DESKTOP in
                 i3) line="exec --no-startup-id $cmd" ;;
                 sway) line="exec $cmd" ;;
-                hyprland) line="exec-once = $cmd" ;;
+                hyprland)
+                    if hypr_lua; then
+                        line="hl.on(\"hyprland.start\", function() hl.exec_cmd($(lua_string "$cmd")) end)"
+                    else
+                        line="exec-once = $cmd"
+                    fi
+                    ;;
             esac
             if confirm "start her at login from $(tilde "$WMCONF") (a backup first)"; then
                 info "she starts at login from your $DESKTOP config (--no-autostart to skip)"
