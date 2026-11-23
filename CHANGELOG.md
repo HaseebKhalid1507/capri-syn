@@ -9,6 +9,9 @@
   as a cover; bars, docks, side panels and popups still do. A modal overlay that big (a launcher's or
   logout screen's dimmer) doesn't count either, so she may sit on what it hides: `hyprctl layers`
   doesn't say which layers take the keyboard.
+- **Hyprland: the Line and Settings grow to fit their contents** instead of staying at their
+  initial 120 px height with the input field or Settings rows cut off (#145). They remain overlay
+  layer surfaces, never tiled; no Hyprland config changes are needed.
 
 ## 1.2.0 (2026-11-23)
 

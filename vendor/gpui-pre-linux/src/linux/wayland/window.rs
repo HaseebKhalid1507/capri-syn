@@ -1173,11 +1173,17 @@ impl WaylandWindowStatePtr {
             .map(|v| f32::from(v) as i32)
             .map_size(|v| if v <= 0 { 1 } else { v });
 
+            // Only layer_ctl::set_bounds opts in. Ack/render the compositor's size,
+            // but keep the latest requested size if this reply was already in flight.
+            let (width, height) = super::layer_size::configure_request(
+                self.ctl.requested_size.get(),
+                (window_geometry.size.width, window_geometry.size.height),
+            );
             state.surface_state.set_geometry(
                 window_geometry.origin.x,
                 window_geometry.origin.y,
-                window_geometry.size.width,
-                window_geometry.size.height,
+                width,
+                height,
             );
 
             let initial_configure = self.frame_loop.get() == FrameLoop::Unconfigured;
@@ -2641,6 +2647,9 @@ pub mod layer_ctl {
 
     #[derive(Default)]
     pub(super) struct Ctl {
+        /// Last explicit layer bounds request. A configure already in flight must not
+        /// replace a newer size when configure handling echoes the window geometry.
+        pub(super) requested_size: Cell<Option<(u32, u32)>>,
         /// Inside `frame()`: GPUI is painting, its present commits what is set now.
         pub(super) in_frame: Cell<bool>,
         /// Set outside a frame, not committed yet.
@@ -2721,6 +2730,19 @@ pub mod layer_ctl {
     /// PL-1: margins (top, right, bottom, left), logical px. False: not a layer window.
     pub fn set_margin(surface: usize, m: [i32; 4], c: Commit) -> bool {
         with(surface, |w, ls| {
+            ls.set_margin(m[0], m[1], m[2], m[3]);
+            commit(w, c);
+        })
+        .is_some()
+    }
+
+    /// Logical size and margins in one commit. The compositor's configure (not this
+    /// setter) resizes GPUI's buffer. Positive sizes: zero would ask it to choose a size.
+    pub fn set_bounds(surface: usize, m: [i32; 4], size: (u32, u32), c: Commit) -> bool {
+        with(surface, |w, ls| {
+            let size = (size.0.max(1), size.1.max(1));
+            w.ctl.requested_size.set(Some(size));
+            ls.set_size(size.0, size.1);
             ls.set_margin(m[0], m[1], m[2], m[3]);
             commit(w, c);
         })

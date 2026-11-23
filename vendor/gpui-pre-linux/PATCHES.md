@@ -35,4 +35,11 @@ interactivity once, at creation, and commits every input-region change on its ow
 - **PL-4** `set_layer(surface, Layer)` (v2+): committed now (`[brain] fullscreen = "stay"`, later).
 - `commit_pending(surface)`: commit and flush now (tests drive the stage with the loop blocked).
 
+- **Panel sizing (#145)** `set_bounds(surface, margins, size, Commit)`: logical size and margins
+  in one commit. `LayerStage::place` formerly dropped width/height, stranding the measured Line
+  and Settings at their bootstrap 120 px. The layer configure drives GPUI's viewport and buffer;
+  its geometry echo preserves the latest explicit request if an older configure is in flight.
+  Only surfaces using this setter opt in; xdg toplevels/popups and other callers are unchanged.
+  `layer_size.rs` holds the pure configure-echo policy and its unit tests.
+
 Drop these if upstream GPUI grows runtime layer-surface setters.

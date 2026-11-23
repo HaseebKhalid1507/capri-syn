@@ -72,7 +72,7 @@ impl World {
     }
 }
 
-fn hyprctl(args: &[&str]) -> String {
+pub(super) fn hyprctl(args: &[&str]) -> String {
     let o = Command::new("hyprctl").args(args).output().expect("hyprctl");
     String::from_utf8_lossy(&o.stdout).trim().to_string()
 }
@@ -281,9 +281,7 @@ impl Driver for HDriver {
     }
 }
 
-#[test]
-#[ignore = "needs the Wayland rig: tools/wlrig/run.sh env SA_CONTRACT_HYPR=1 <test binary> --ignored contract_hypr"]
-fn contract_hypr() {
+pub(super) fn require_rig() {
     // Inside the rig's sandbox only: its runtime dir, its Hyprland.
     let rig = std::env::var("RIG").unwrap_or_default();
     assert!(std::env::var("SA_CONTRACT_HYPR").is_ok_and(|v| v == "1") && !rig.is_empty(), "refusing: run inside tools/wlrig (run.sh) with SA_CONTRACT_HYPR=1");
@@ -292,6 +290,12 @@ fn contract_hypr() {
     let run = std::path::PathBuf::from(std::env::var("XDG_RUNTIME_DIR").unwrap_or_default());
     assert!(run.join("rig.ready").exists(), "refusing: not the rig's runtime dir");
     assert_eq!(std::fs::read_dir(run.join("hypr")).map(|d| d.count()).unwrap_or(0), 1, "exactly the rig's Hyprland");
+}
+
+#[test]
+#[ignore = "needs the Wayland rig: tools/wlrig/run.sh env SA_CONTRACT_HYPR=1 <test binary> --ignored contract_hypr"]
+fn contract_hypr() {
+    require_rig();
     let (desk, stage) = super::connect().expect("the rig's Hyprland");
     let os = Rc::new(Os::new(desk.clone(), Box::new(stage)));
     let result: Rc<RefCell<Option<anyhow::Result<Vec<&'static str>>>>> = Rc::default();
