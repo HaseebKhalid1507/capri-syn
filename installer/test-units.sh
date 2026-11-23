@@ -502,7 +502,7 @@ hypr() {
     SUMMON='' SUMMON_KEY=''
     step_summon >"$tmp/out" 2>&1
 }
-confirm() { echo "asked: $1"; return 0; }
+confirm() { echo "asked: $1"; return "${CONFIRM_RESULT:-0}"; }
 hypr 'bind = $mainMod, C, killactive,'
 check "$([ "$SUMMON_KEY" = Super+Alt+C ] && grep -qx "bind = SUPER ALT, C, exec, $BIN/avatarctl talk press" "$hc" &&
     grep -qx "bindr = SUPER ALT, C, exec, $BIN/avatarctl talk release" "$hc" && grep -qx 'bind = $mainMod, C, killactive,' "$hc" && echo 0)" \
@@ -544,10 +544,8 @@ hypr_lua_config "hl.bind(' SUPER+c ', hl.dsp.no_op())" "hl.bind('alt + super + C
 check "$([ -z "$SUMMON_KEY" ] && ! grep -q avatarctl "$hl" && grep -q 'Super+Alt+C is taken too' "$tmp/out" && echo 0)" "Lua: both literal keys taken (case/spacing/order/single quotes), neither overridden"
 hypr_lua_config 'hl.bind("WIN + C", hl.dsp.no_op())' 'hl.bind(mainMod .. " + ALT + C", hl.dsp.no_op())'
 check "$([ -z "$SUMMON_KEY" ] && ! grep -q avatarctl "$hl" && echo 0)" "Lua: mainMod+Alt+C fallback taken too"
-confirm() { echo "asked: $1"; return 1; }
-hypr_lua_config '-- his config'
+CONFIRM_RESULT=1 hypr_lua_config '-- his config'
 check "$([ -z "$SUMMON_KEY" ] && ! grep -q avatarctl "$hl" && grep -q 'hl.bind("SUPER + C"' "$tmp/out" && echo 0)" "Lua: no consent, only shows valid Lua to add himself"
-confirm() { echo "asked: $1"; return 0; }
 DRY=1 hypr_lua_config '-- his config'
 check "$(! grep -q avatarctl "$hl" && echo 0)" "Lua: dry run leaves config alone"
 hypr_lua_config "hl.bind(\"SUPER + X\", hl.dsp.exec_cmd(\"$BIN/avatarctl talk press\"))"
