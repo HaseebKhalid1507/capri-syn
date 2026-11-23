@@ -334,3 +334,214 @@ fn contract_hypr() {
     eprintln!("contract_hypr: {} scenarios passed: {}", passed.len(), passed.join(", "));
     assert_eq!(passed.len(), 15);
 }
+
+/// What the stack is made of, from snapshots of a live two-output caelestia session (no Hyprland, no
+/// display: plain `cargo test`).
+/// `hyprctl layers` says where a layer is, never what it draws, so these pin which geometry
+/// counts as a window's cover (`occludes`: a layer that contains its output's work area is the
+/// shell's canvas, none) and that the perch rules then find the edges open.
+mod shell_overlay {
+    use super::super::{HClient, HLayer, HMon, Ids, Snap, WsRef, occludes};
+    use crate::edges::{WinRect, exposed_spans, seat_ranges};
+
+    /// The contact extent of her sitting (the live error's: -32..49 about the seat) and
+    /// `view.rs`'s `EDGE_MARGIN`.
+    const CONTACT: (i32, i32) = (-32, 49);
+    const MARGIN: i32 = 60;
+
+    /// `hyprctl monitors` of that session: eDP-1 2560x1600 at the origin, DP-2 2560x1440 to its right,
+    /// both at scale 1 with caelestia's reserved edges (left, top, right, bottom).
+    fn outputs() -> Vec<HMon> {
+        let mon = |id: i64, name: &str, x: i32, h: i32, ws: i64| HMon {
+            id,
+            name: name.into(),
+            x,
+            y: 0,
+            width: 2560,
+            height: h,
+            scale: 1.0,
+            reserved: vec![60, 10, 10, 10],
+            active_workspace: WsRef { id: ws },
+            ..Default::default()
+        };
+        vec![mon(1, "eDP-1", 0, 1600, 1), mon(0, "DP-2", 2560, 1440, 2)]
+    }
+
+    /// A mapped client on monitor `mon`'s workspace `ws`.
+    fn client(address: &str, mon: i64, ws: i64, floating: bool, at: [i32; 2], size: [i32; 2]) -> HClient {
+        HClient { address: address.into(), stable_id: format!("s{address}"), mapped: true, at, size, workspace: WsRef { id: ws }, floating, monitor: mon, class: "kitty".into(), ..Default::default() }
+    }
+
+    /// One tiled window per output, gaps and the reserved edges kept clear.
+    fn tiled() -> Vec<HClient> {
+        vec![client("0x16", 1, 1, false, [70, 10], [2480, 1580]), client("0x8", 0, 2, false, [2630, 10], [2420, 1420])]
+    }
+
+    fn layer(mon: &str, level: u8, ns: &str, (x, y, w, h): (i32, i32, i32, i32)) -> (String, u8, HLayer) {
+        (mon.into(), level, HLayer { address: format!("{mon}:{ns}:{x},{y}"), x, y, w, h, namespace: ns.into() })
+    }
+
+    /// Every top layer on both outputs as `hyprctl layers` listed them with caelestia up (hers
+    /// among them): a drawers layer over each whole output, 1x1 probes, her own.
+    fn caelestia() -> Vec<(String, u8, HLayer)> {
+        let probes = |mon: &str, at: [(i32, i32); 4]| at.map(|(x, y)| layer(mon, 2, "caelestia-border-exclusion", (x, y, 1, 1)));
+        let mut ls = vec![layer("eDP-1", 2, "caelestia-drawers", (0, 0, 2560, 1600)), layer("DP-2", 2, "caelestia-drawers", (2560, 0, 2560, 1440))];
+        ls.extend(probes("eDP-1", [(0, 800), (1310, 0), (2559, 805), (1305, 1599)]));
+        ls.extend(probes("DP-2", [(2560, 720), (3870, 0), (5119, 725), (3865, 1439)]));
+        ls.push(layer("DP-2", 2, "quickshell", (3865, 720, 1, 1)));
+        ls.push(layer("DP-2", 2, "capri-body", (2560, 0, 500, 708)));
+        ls
+    }
+
+    /// x intervals, root px.
+    type Spans = Vec<(i32, i32)>;
+
+    /// The exposed spans of the top edge of the window whose left edge is at `x`, and the seat
+    /// ranges on them: what `Avatar::perch` finds.
+    fn edge(s: &Snap, x: i32) -> (Spans, Spans) {
+        let stack = s.stack(&mut Ids::default());
+        let rects: Vec<WinRect> = stack.iter().map(|w| w.rect).collect();
+        let i = stack.iter().position(|w| w.managed && w.rect.x == x).expect("the window is in the stack");
+        (exposed_spans(&rects, i), seat_ranges(&rects, i, CONTACT, MARGIN))
+    }
+
+    fn occluders(s: &Snap) -> usize {
+        s.stack(&mut Ids::default()).iter().filter(|w| !w.managed).count()
+    }
+
+    #[test]
+    fn a_shells_full_output_layer_hides_no_window() {
+        // The live bug: `perch sit` and `perch stand` both ended in `edge hidden ... exposed []`.
+        let s = Snap { mons: outputs(), clients: tiled(), layers: caelestia() };
+        assert_eq!(occluders(&s), 0, "none of caelestia's (nor hers) is a cover");
+        for (x, w) in [(70, 2480), (2630, 2420)] {
+            let (spans, seats) = edge(&s, x);
+            assert_eq!(spans, vec![(x, x + w)], "the window at x {x}: its whole top edge is open");
+            assert_eq!(seats, vec![(x + MARGIN + 32, x + w - MARGIN - 49)], "the window at x {x}: she can sit on it");
+        }
+    }
+
+    #[test]
+    fn a_canvas_is_measured_in_logical_px() {
+        // 3840x2400 at 1.5 is 2560x1600 to the layer shell, and `reserved` is in its px too: a
+        // canvas over the output, or one over what is left of it, covers the work area.
+        let mon = HMon { id: 0, name: "DP-1".into(), width: 3840, height: 2400, scale: 1.5, reserved: vec![60, 10, 10, 10], active_workspace: WsRef { id: 1 }, ..Default::default() };
+        assert_eq!(mon.work_area(false).rect(), WinRect::new(60, 10, 2490, 1580));
+        for canvas in [(0, 0, 2560, 1600), (60, 10, 2490, 1580)] {
+            let s = Snap { mons: vec![mon.clone()], clients: vec![client("0x1", 0, 1, false, [70, 10], [2480, 1580])], layers: vec![layer("DP-1", 2, "ags", canvas)] };
+            assert_eq!(occluders(&s), 0, "{canvas:?}");
+            assert_eq!(edge(&s, 70).0, vec![(70, 2550)]);
+        }
+    }
+
+    #[test]
+    fn slivers_hide_nothing() {
+        // On the top edge of the window on eDP-1 (y 10): a 1x1 probe, a hot edge along it and
+        // another across it, and a 2x2 over the other output's window.
+        let layers = vec![
+            layer("eDP-1", 2, "probe", (500, 10, 1, 1)),
+            layer("eDP-1", 3, "hot-edge", (0, 9, 2560, 2)),
+            layer("eDP-1", 3, "hot-edge", (1000, 0, 2, 1600)),
+            layer("DP-2", 2, "probe", (3000, 10, 2, 2)),
+        ];
+        let s = Snap { mons: outputs(), clients: tiled(), layers };
+        assert_eq!(occluders(&s), 0);
+        assert_eq!(edge(&s, 70).0, vec![(70, 2550)]);
+        assert_eq!(edge(&s, 2630).0, vec![(2630, 5050)]);
+    }
+
+    #[test]
+    fn a_bar_and_a_popup_still_cover_beside_a_shells_canvas() {
+        let mut layers = caelestia();
+        // A bar over the top of eDP-1 and a notification over DP-2's window, a level up.
+        layers.push(layer("eDP-1", 2, "waybar", (0, 0, 2560, 32)));
+        layers.push(layer("DP-2", 3, "swaync", (4600, 30, 400, 120)));
+        // A floating window with its top edge under the bar; a tiled one under the popup.
+        let clients = vec![client("0x20", 1, 1, true, [200, 16], [1200, 800]), client("0x8", 0, 2, false, [2630, 40], [2420, 1390])];
+        let s = Snap { mons: outputs(), clients, layers };
+        assert_eq!(occluders(&s), 2, "the bar and the popup, not the canvases");
+        let (spans, seats) = edge(&s, 200);
+        assert!(spans.is_empty() && seats.is_empty(), "the bar covers the whole edge: {spans:?}");
+        let (spans, seats) = edge(&s, 2630);
+        assert_eq!(spans, vec![(2630, 4600), (5000, 5050)], "the popup covers its stretch of the edge");
+        assert!(!seats.is_empty(), "the rest of it is open");
+    }
+
+    #[test]
+    fn a_canvas_is_judged_by_its_own_output() {
+        // A 4K output with a 1080p one to its right: each one's canvas is the other's cover, the
+        // one that fits is told by the name `hyprctl layers` files it under (not the first output,
+        // the biggest, or the one the list ends with), whatever order the outputs come in.
+        let mon = |id: i64, name: &str, x: i32, (w, h): (i32, i32)| HMon { id, name: name.into(), x, width: w, height: h, scale: 1.0, active_workspace: WsRef { id: id + 1 }, ..Default::default() };
+        let (dp, hdmi) = (mon(0, "DP-1", 0, (3840, 2160)), mon(1, "HDMI-A-1", 3840, (1920, 1080)));
+        for mons in [vec![dp.clone(), hdmi.clone()], vec![hdmi, dp]] {
+            for (filed_under, canvas, covers) in [("DP-1", (0, 0, 3840, 2160), 0), ("HDMI-A-1", (3840, 0, 1920, 1080), 0), ("DP-1", (3840, 0, 1920, 1080), 1), ("HDMI-A-1", (0, 0, 3840, 2160), 1)] {
+                let s = Snap { mons: mons.clone(), clients: Vec::new(), layers: vec![layer(filed_under, 2, "shell", canvas)] };
+                assert_eq!(occluders(&s), covers, "{canvas:?} filed under {filed_under}");
+            }
+        }
+        // And one that names no output is no canvas.
+        let s = Snap { mons: vec![mon(0, "DP-1", 0, (3840, 2160))], clients: Vec::new(), layers: vec![layer("eDP-1", 2, "shell", (0, 0, 3840, 2160))] };
+        assert_eq!(occluders(&s), 1);
+    }
+
+    #[test]
+    fn a_canvas_beside_a_bar_and_a_dock_on_a_small_screen() {
+        // 1366x768 with a 48 px bar and a 48 px dock: the canvas is what they leave, 87.5% of
+        // the output tall. Only the bar and the dock cover; the window between them has its edge.
+        let mon = HMon { id: 0, name: "LVDS-1".into(), width: 1366, height: 768, scale: 1.0, reserved: vec![0, 48, 0, 48], active_workspace: WsRef { id: 1 }, ..Default::default() };
+        let layers = vec![layer("LVDS-1", 2, "shell", (0, 48, 1366, 672)), layer("LVDS-1", 2, "bar", (0, 0, 1366, 48)), layer("LVDS-1", 2, "dock", (0, 720, 1366, 48))];
+        let s = Snap { mons: vec![mon], clients: vec![client("0x1", 0, 1, false, [8, 56], [1350, 656])], layers };
+        let covers: Vec<_> = s.stack(&mut Ids::default()).into_iter().filter(|w| !w.managed).map(|w| (w.rect.y, w.rect.h)).collect();
+        assert_eq!(covers, vec![(0, 48), (720, 48)], "the bar and the dock");
+        let (spans, seats) = edge(&s, 8);
+        assert_eq!(spans, vec![(8, 1358)]);
+        assert!(!seats.is_empty());
+    }
+
+    #[test]
+    fn a_centred_panel_is_a_cover() {
+        // A panel 94% of the output both ways, centred (an opaque launcher or settings box):
+        // near the whole output, but not its work area, so it hides the window under it.
+        let mon = HMon { id: 0, name: "eDP-1".into(), width: 2560, height: 1600, scale: 1.0, reserved: vec![60, 10, 10, 10], active_workspace: WsRef { id: 1 }, ..Default::default() };
+        let clients = vec![client("0x1", 0, 1, true, [200, 100], [800, 600])];
+        let open = Snap { mons: vec![mon.clone()], clients: clients.clone(), layers: Vec::new() };
+        assert_eq!(edge(&open, 200).0, vec![(200, 1000)]);
+        let s = Snap { mons: vec![mon], clients, layers: vec![layer("eDP-1", 3, "launcher", (77, 48, 2406, 1504))] };
+        assert_eq!(occluders(&s), 1);
+        assert!(edge(&s, 200).0.is_empty(), "the panel covers it");
+    }
+
+    #[test]
+    fn the_rule() {
+        let l = |(x, y, w, h): (i32, i32, i32, i32)| HLayer { x, y, w, h, ..Default::default() };
+        // eDP-1 with caelestia's reserved edges: 2560x1600 less 70 and 20 px.
+        let work = Some(WinRect::new(60, 10, 2490, 1580));
+        // The whole output, what is left of it, and a layer that bleeds past it: the canvas.
+        assert!(!occludes(&l((0, 0, 2560, 1600)), work));
+        assert!(!occludes(&l((60, 10, 2490, 1580)), work));
+        assert!(!occludes(&l((-20, -20, 2600, 1640)), work));
+        // Rounding (SLIVER) is allowed on each side; a px more is a cover.
+        assert!(!occludes(&l((62, 12, 2486, 1576)), work));
+        assert!(occludes(&l((63, 10, 2487, 1580)), work), "left");
+        assert!(occludes(&l((60, 13, 2490, 1577)), work), "top");
+        assert!(occludes(&l((60, 10, 2487, 1580)), work), "right");
+        assert!(occludes(&l((60, 10, 2490, 1577)), work), "bottom");
+        // A bar, a dock, a side panel, a half-screen sidebar, a popup, a centred panel: covers.
+        assert!(occludes(&l((0, 0, 2560, 32)), work));
+        assert!(occludes(&l((0, 1536, 2560, 64)), work));
+        assert!(occludes(&l((0, 0, 64, 1600)), work));
+        assert!(occludes(&l((1280, 0, 1280, 1600)), work));
+        assert!(occludes(&l((4600, 30, 400, 120)), work));
+        assert!(occludes(&l((77, 48, 2406, 1504)), work));
+        // Slivers, whatever the output.
+        for sliver in [(0, 0, 1, 1), (0, 0, 2560, 2), (0, 0, 2, 1600), (700, 9, 2, 2)] {
+            assert!(!occludes(&l(sliver), work), "{sliver:?}");
+            assert!(!occludes(&l(sliver), None), "{sliver:?}");
+        }
+        assert!(occludes(&l((0, 0, 3, 3)), work));
+        // An output she doesn't know of, or one with nothing left: no canvas to tell, only slivers go.
+        assert!(occludes(&l((0, 0, 2560, 1600)), None));
+        assert!(occludes(&l((0, 0, 2560, 1600)), Some(WinRect::new(0, 0, 0, 0))));
+    }
+}
