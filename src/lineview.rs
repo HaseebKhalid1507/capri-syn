@@ -408,6 +408,7 @@ impl Avatar {
     pub(super) fn line_follow(&mut self, h: Option<i32>, cx: &mut Context<Self>) {
         let Some(l) = &self.line else { return };
         if self.os.panel_needs_reopen(l.xid) {
+            if self.teleport.is_some() || self.rag.is_some() || self.press.is_some() || self.brain_in_flight() { return; }
             self.line_reopen_on_output(cx);
             return;
         }
@@ -416,12 +417,12 @@ impl Avatar {
         let sf = self.layout.sf;
         let Some(l) = &mut self.line else { return };
         let r = p.rect;
-        l.her = her;
         let at = (r.x, r.bottom(), r.w, r.h);
         if at != l.at {
+            if self.os.place(l.xid, r.x, r.y, r.w, r.h).is_err() { return; }
             l.at = at;
-            self.os.place(l.xid, r.x, r.y, r.w, r.h).ok();
         }
+        l.her = her;
         let tail = Some((p.side, p.tail));
         if tail != l.tail {
             l.tail = tail;
@@ -439,30 +440,32 @@ impl Avatar {
         let Some(old) = self.line.take() else { return };
         let me = cx.entity().downgrade();
         cx.defer(move |cx| {
-            let saved = old.handle.update(cx, |_, window, cx| old.view.update(cx, |line, cx| line.detach_for_output(window, cx)));
-            if let Ok((draft, sent, page)) = saved {
-                me.update(cx, |a, cx| {
-                    if a.line.is_some() { return; }
-                    a.draft = draft;
-                    a.sent = sent;
-                    let result = a.open_line_with_focus(page, Some(!old.parked), cx);
-                    if let Some(l) = &mut a.line {
-                        l.prev = old.prev;
-                        // Moving her is not permission to steal the keyboard from his terminal.
-                        l.parked = old.parked;
-                        l.waiting = old.waiting;
-                        let (v, hd, parked, waiting) = (l.view.clone(), l.handle, old.parked, old.waiting);
-                        if parked {
-                            a.os.release_keyboard(l.xid, None).ok();
-                            cx.defer(move |cx| { hd.update(cx, |_, _, cx| v.update(cx, |l, cx| l.park_on_output(waiting, cx))).ok(); });
-                        } else {
-                            a.os.grab_keyboard(l.xid).ok();
-                        }
-                        a.os.arm_clicks(!parked);
+            let saved = old.handle.update(cx, |_, window, cx| old.view.update(cx, |line, cx| line.detach_for_output(window, cx)))
+                .unwrap_or_else(|_| old.view.update(cx, |line, cx| line.output_draft(cx)));
+            me.update(cx, |a, cx| {
+                // Even if a user opened another Line during this defer, retain the old
+                // draft in the avatar; never overwrite the new live field.
+                a.draft = saved.draft.clone();
+                if a.line.is_some() { return; }
+                a.sent = saved.sent.clone();
+                let result = a.open_line_with_focus(saved.page, Some(!old.parked), Some(old.at.3), cx);
+                if let Some(l) = &mut a.line {
+                    l.prev = old.prev;
+                    l.view.update(cx, |line, cx| line.restore_output_selection(&saved, cx));
+                    // Moving her is not permission to steal the keyboard from his terminal.
+                    l.parked = old.parked;
+                    l.waiting = old.waiting;
+                    let (v, hd, parked, waiting) = (l.view.clone(), l.handle, old.parked, old.waiting);
+                    if parked {
+                        a.os.release_keyboard(l.xid, None).ok();
+                        cx.defer(move |cx| { hd.update(cx, |_, _, cx| v.update(cx, |l, cx| l.park_on_output(waiting, cx))).ok(); });
+                    } else {
+                        a.os.grab_keyboard(l.xid).ok();
                     }
-                    elog!("synaps-avatar: Line recreated on body output: {result}");
-                }).ok();
-            }
+                    a.os.arm_clicks(!parked);
+                }
+                elog!("synaps-avatar: Line recreated on body output: {result}");
+            }).ok();
         });
     }
 
@@ -504,13 +507,13 @@ impl Avatar {
     }
 
     pub(super) fn open_line_on(&mut self, page: Page, cx: &mut Context<Self>) -> String {
-        self.open_line_with_focus(page, None, cx)
+        self.open_line_with_focus(page, None, None, cx)
     }
 
-    fn open_line_with_focus(&mut self, page: Page, take: Option<bool>, cx: &mut Context<Self>) -> String {
+    fn open_line_with_focus(&mut self, page: Page, take: Option<bool>, height: Option<i32>, cx: &mut Context<Self>) -> String {
         let now = Instant::now();
         let sf = self.layout.sf;
-        let h0 = (LINE_H0 * sf) as i32;
+        let h0 = height.unwrap_or((LINE_H0 * sf) as i32);
         let (place, area, her) = self.line_place(h0);
         let (x, w, h) = (place.rect.x, place.rect.w, place.rect.h);
         let bottom = place.rect.bottom();

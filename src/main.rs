@@ -519,7 +519,7 @@ fn run(t_start: Instant) -> Result<()> {
         let mut options = os.window_options(platform::Role::Body, bounds, false);
         let hosts = os.host_per_output();
         if hosts {
-            options.display_id = host::display_for(cx, bounds);
+            options = host::options(cx, &os, platform::Role::Body, bounds).unwrap_or_else(|e| fatal(startfail::Why::Other, e));
         }
 
         let (tx, rx) = async_channel::unbounded::<(control::Command, control::Reply)>();

@@ -61,8 +61,10 @@ margins only, so moving her to another host also left the panel on its original 
 ## Change (height growth confirmed; output fix pending real-run confirmation)
 
 Only `Role::Line` (`capri-line`, including Settings) opts into live dimensions in
-`LayerStage::place`. It converts device dimensions to positive logical pixels with
-`(v / scale - 1e-3).ceil()` (the tolerance prevents float noise adding a pixel).
+`LayerStage::place`. It clamps requests to positive **logical** pixels. Hyprland's core
+`layout.sf` is 1 (GPUI has no primary display); GPUI alone scales the drawable buffer.
+Dividing dimensions, margins or input regions by the fractional output scale again was wrong.
+`Os::adopt` now registers hosts from the stage's named monitor, not buffer-scaled window bounds.
 **Width is live too**, following placement instead of remaining frozen at opening width.
 Reader-follow and effect-host `place` remain margin-only, as before this PR. Effect hosts'
 existing `Window::resize` retains its original size/scale calculation. The pure scope test
@@ -82,18 +84,43 @@ unmanaged surfaces are not opted in. Configures are still acknowledged.
 
 - `Os::panel_options` invokes Hyprland's `Stage::pin_output` for every per-moment creation:
   Line/Settings, Reader, chip, cinematic intro and cut-in. Other backends use the default no-op.
-- `layer_ctl::output_id` exposes the actual wl_output protocol id chosen when the body host
-  was created, before `wl_surface.enter`. Panels copy that id into `WindowOptions::display_id`;
-  their margins use the same active body host's origin/scale. No monitor-index guessing,
-  no focused-output fallback. A disappeared/unadvertised body output fails closed.
+- Startup, dormant/effect hosts and panels all select the output by **wl_output v4 name**,
+  matching `hyprctl monitors`. `WaylandDisplay::uuid` already exposes UUIDv5(name); the vendor
+  bridge resolves that identity to `DisplayId` without changing upstream display geometry.
+  The earlier `output_id(body)` dependency is removed: an implicitly created body no longer
+  disables every panel. `host::options` is shared by production and the contract. A genuinely
+  unadvertised/removed output is still an error, not permission to use the focused output.
+- Fractional-scale evidence from review: 2560×1600 @1.25 has Hyprland bounds 2048×1280, but
+  GPUI divides by integer wl_output.scale=2 and reports 1280×800. Body centres beyond that
+  smaller box used to get no display_id. Name identity is independent of this discrepancy.
+  Surface records and host IDs use names, not origins; margins use the current named origin.
+- Monitor geometry/reservations are cached and invalidated on socket2 layout events. Repeated
+  `body_area`/`place` calls do not issue two synchronous IPC requests per follow. Work area is
+  `HMon::work_area` from merged #151, not a second reserved-area implementation.
 - `Stage::body_area` uses that host's monitor minus Hyprland's reserved areas, not the focused
   monitor. The Line's bootstrap bounds and every subsequent `place` are fitted to all four
   usable edges, reducing height if needed. Core measurement/placement uses the same area;
   a layout-change event rechecks an already-open Line even if her body has not moved.
-- On a body-host change, Line/Settings are recreated on the new wl_output. The draft, sent
-  history, page, parked/waiting state and focus-return owner are kept; window-bound input
-  subscriptions are rebuilt. Reader is recreated with its text/scroll/focus owner, chip is
-  reopened. Changing margins is never used as a substitute for changing the layer output.
+- On a body-host change, panels are recreated **after landing**, never on each crossing
+  during drag/flight. This keeps #152's drag-release keyboard holder alive. Line reopens at
+  its previous `l.at.3` height (clamped on the new output), not the 120 px bootstrap.
+- Draft, sent history, page, parked/waiting state and focus-return owner survive. If the old
+  window is already gone, the retained Line entity supplies the draft. If another Line has
+  opened during the defer, the old draft is saved in the avatar without replacing its field.
+  Placement caches advance only after `Os::place` succeeds. Reader retains text/scroll/focus;
+  chip reopens. Intro uses the current body host, as its comment now states.
+
+### Input handoff limits (explicit)
+
+The ordinary chat field commits its currently displayed IME preedit via `unmark_text` before
+reading it; no message is submitted. Its UTF-8 selection and direction/caret survive. With an
+already-destroyed window, copying the displayed text into a fresh input commits the visible
+preedit without carrying stale IME state. Undo history and scroll/selection in secret fields
+are not transferred. **An unsent API key (Settings ▸ Brain) and a partly typed hidden prompt
+answer are dropped on output migration**; they must be re-entered. On a live-window handoff
+the old fields are cleared before removal; on window loss their entities are dropped. They
+are never copied into the ordinary draft or persisted/logged. Preserving these secret inputs
+is a follow-up, not a capability claimed by this PR.
 
 No X11, Windows, xdg-toplevel/popup or other-compositor behavior changes. The shared Line height
 helper is a verbatim extraction of the original truncate-before-clamp expression, not a new
@@ -103,8 +130,8 @@ markers, but a `windowrule` cannot size a layer surface or repair this bug. No r
 
 ## Verification
 
-- Fifteen pure Rust tests cover bootstrap → chat → Settings → shrink; 100%, 125%, 150%, 200%
-  scale conversion and float noise; nonzero requests; Line-only scope; stale configure buffer
+- Fifteen pure Rust tests cover bootstrap → chat → Settings → shrink; fractional-output
+  logical sizing/margins, negative origins; nonzero requests; Line-only scope; stale configure buffer
   and echo protection; later `Window::resize`; unchanged unmanaged policy; and the original
   truncate/clamp logic. The impossible `(0, 0)` **geometry echo** test is gone (the caller
   clamps geometry first). Zero *requested* sizes remain tested at the conversion boundary.
@@ -114,16 +141,22 @@ markers, but a `windowrule` cannot size a layer surface or repair this bug. No r
 - `platform::hypr::panel_test::contract_hypr_panels` opens the **real Line** and Settings with
   deterministic transcript/draft, without art, daemon, login or audio. It uses the production
   height helper (`lineview` truncation and work-area/minimum clamp) and `beside::place`, not
-  a raw `ceil(height * scale)` request. It covers fresh chat, fresh Settings and both swaps;
+  a raw `ceil(height * scale)` request. The harness uses production `layout.sf=1`, not the
+  fractional drawable `window.scale_factor()`. It covers fresh chat, fresh Settings and both swaps;
   layer/viewport height (chat ≥180 px, Settings ≥300 px); visible bottom controls; overlay
   membership, absent from xdg clients; delayed height stability; live width (780→620); and a
   subsequent `Window::resize` to 640×700 that stays there after another configure/frame.
-  The rig now asserts **two outputs**, 2560×1600 and 2560×1440, with focus opposite her body;
+  The rig asserts **three outputs**: 2560×1600 @1, 2560×1440 @1 and 3072×1920 @1.5 (logical
+  2048×1280). Host creation uses `host::options`, exactly as production, including a centre
+  outside GPUI's integer-scale bounds on the third output. Focus is opposite her body;
   Line must map inside the body's monitor block in `hyprctl -j layers`, never the focused one.
   It checks an over-height/off-screen request, moves her to the second host while Settings is
   open, recreates the Line with its draft/history/page, and checks Reader/chip/Intro binding.
   Reader/chip/Intro use stand-ins; chat and Settings are the real views. These output assertions
-  fail on 5c89162, even though that head's height-only assertions can pass.
+  fail on 5c89162, even though that head's height-only assertions can pass. The fractional
+  output asserts viewport/layer dimensions agree, and a handoff exercises composed text,
+  reversed selection, then a closed-window draft read. **This contract is pending**: no rig
+  or app build was run locally; the maintainer will schedule it after CI builds the harness.
 - Atomic presentation is implemented client-side and stale-buffer policy is unit-tested;
   the contract checks settled geometry, **not a captured per-frame visual proof**. Use
   `WAYLAND_DEBUG=client` and/or a recording in the isolated rig if checking for transient stretch.
@@ -178,7 +211,7 @@ bypass the SSH/seat or GPU guards. No daemon credentials or real conversation ar
 `down.sh` retains logs at `$LOGS` and removes the dedicated rig directory.
 
 Expected contract time is a few seconds on a healthy rig, **not yet measured** here. There are
-twenty bounded settling loops of at most 5 seconds, plus a 5-second output-discovery bound,
+bounded settling loops of at most 5 seconds, plus a 5-second output-discovery bound,
 delays and rendering/IPC time. The 150-second watchdog also catches startup/event-loop hangs.
 Rig startup has its own 30-second readiness bound; teardown normally takes <6 seconds.
 Allow about three minutes total, excluding artifact download.

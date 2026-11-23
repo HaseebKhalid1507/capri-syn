@@ -26,7 +26,9 @@
   confirmed growth but exposed a second bug: panels opened on the focused monitor instead of
   hers. All per-moment layers now name her body's output explicitly; open Line/Settings,
   Reader and chip follow output changes by recreation. The Line is clamped to that output's
-  usable edges. **Output fix pending real-run confirmation.** Effect-host behavior and other
+  usable edges. Hosts and panels match outputs by name, including fractional scaling; panels
+  recreate after landing, keeping chat draft/selection and height. Unsent API-key/hidden-prompt
+  text must be re-entered after migration. **Output fix pending real-run confirmation.** Other
   backends are unchanged.
 
 ## 1.2.0 (2026-11-23)
