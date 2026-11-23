@@ -58,6 +58,13 @@ impl HMon {
         let s = if self.scale > 0.0 { self.scale } else { 1.0 };
         Monitor { primary, x: self.x, y: self.y, w: (self.width as f32 / s).round() as i32, h: (self.height as f32 / s).round() as i32 }
     }
+
+    /// The output less what layers with an exclusive zone reserve (`reserved`).
+    fn work_area(&self, primary: bool) -> Monitor {
+        let m = self.monitor(primary);
+        let g = |i: usize| self.reserved.get(i).copied().unwrap_or(0);
+        Monitor { primary, x: m.x + g(0), y: m.y + g(1), w: m.w - g(0) - g(2), h: m.h - g(1) - g(3) }
+    }
 }
 
 #[derive(Deserialize, Default, Clone)]
@@ -127,9 +134,9 @@ impl Snap {
         let mut cs: Vec<&HClient> = self.clients.iter().filter(|c| self.visible(c) && !ours(&c.class)).collect();
         cs.sort_by_key(|c| (self.special(c), c.fullscreen & 2 != 0, c.floating, -c.focus_history_id));
         let mut out: Vec<Win> = cs.iter().map(|c| Win { rect: WinRect { id: ids.client(&c.address, &c.stable_id), x: c.at[0], y: c.at[1], w: c.size[0], h: c.size[1] }, managed: true }).collect();
-        // The output a layer is on (its logical size), by the name `hyprctl layers` files it under.
-        let output = |name: &str| self.mons.iter().find(|m| m.name == name).map(|m| m.monitor(false)).map(|m| (m.w, m.h));
-        let mut ls: Vec<&(String, u8, HLayer)> = self.layers.iter().filter(|(mon, lvl, l)| *lvl >= 2 && !ours(&l.namespace) && occludes(l, output(mon))).collect();
+        // The work area of the output a layer is on, by the name `hyprctl layers` files it under.
+        let work = |name: &str| self.mons.iter().find(|m| m.name == name).map(|m| m.work_area(false).rect());
+        let mut ls: Vec<&(String, u8, HLayer)> = self.layers.iter().filter(|(mon, lvl, l)| *lvl >= 2 && !ours(&l.namespace) && occludes(l, work(mon))).collect();
         ls.sort_by_key(|(_, lvl, _)| *lvl);
         out.extend(ls.iter().map(|(_, _, l)| Win { rect: WinRect { id: ids.id(&l.address), x: l.x, y: l.y, w: l.w, h: l.h }, managed: false }));
         out
@@ -184,28 +191,30 @@ fn ours(ns_or_class: &str) -> bool {
 }
 
 /// A layer this thin (px, either way) or thinner draws nothing to sit under: hot-edge triggers,
-/// caelestia's 1x1 border-exclusion and quickshell probes.
+/// caelestia's 1x1 border-exclusion and quickshell probes. A layer that misses the work area by
+/// no more than this on a side still covers it: a fractional scale rounds the sizes.
 const SLIVER: i32 = 2;
-/// A layer this much of its output (percent), both ways, is the shell's canvas.
-const CANVAS_PCT: i64 = 90;
 
-/// Whether another client's top or overlay layer `l`, on an output of `output` logical px (None:
-/// unknown), covers the windows under it. `hyprctl layers` reports geometry only, never what is
-/// drawn or where clicks land, so the rule goes by size:
+/// Whether another client's top or overlay layer `l` covers the windows under it. `work` is the
+/// work area of its output (logical px; None: the output is unknown). `hyprctl layers` reports
+/// geometry only, never what is drawn or where clicks land, so the rule goes by geometry:
 /// - A sliver (`SLIVER`) never does.
-/// - A layer that is (nearly) its whole output (`CANVAS_PCT` of it both ways) never does: shells
-///   like caelestia, quickshell, ags and eww draw their bar, drawers and popups on one transparent,
-///   mostly click-through layer the size of the output, so counting it hid every window on that
-///   output (`edge hidden ... exposed []` for each). A surface anchored on all four edges without
-///   an exclusive zone of its own gets the output less the other layers' reserved edges (caelestia
-///   reserves 70 of 2560 and 20 of 1600: 97% and 99% left), and a fractional scale rounds the
-///   output's size; both stay well inside 90. A bar, dock, side panel or notification is long one
-///   way only and thin the other, so it is nowhere near: even a half-screen sidebar still counts.
-///   The price: an opaque layer this big (a launcher's dimmer) lets her sit on what it hides.
+/// - A layer that contains the whole work area never does. Shells like caelestia (and some
+///   quickshell setups; ags and eww mostly make a layer per widget) draw their bar, drawers and
+///   popups on one transparent, mostly click-through layer over each output, so counting it hid
+///   every window on that output (`edge hidden ... exposed []` for each). By the layer-shell
+///   protocol a surface anchored to all four edges gets the whole output (exclusive zone -1) or
+///   the output less what the other layers reserve (0): the work area. So containing it tells such
+///   a canvas at any size, where a share of the output does not (a 48 px bar and dock leave a
+///   canvas 87.5% of a 1366x768 output; a centred panel with a margin all round is 94% of one and
+///   is a cover). A bar, dock, side panel (even a half-screen one) or notification never contains
+///   it: it is thin one way.
+///   The price: an opaque layer this big (a launcher's dimmer, a logout screen) lets her sit on
+///   what it hides. `j/layers` doesn't say which layers take the keyboard, which would tell them.
 /// - Anything else does.
-fn occludes(l: &HLayer, output: Option<(i32, i32)>) -> bool {
-    let share = |part: i32, whole: i32| i64::from(part) * 100 >= i64::from(whole) * CANVAS_PCT;
-    l.w > SLIVER && l.h > SLIVER && !output.is_some_and(|(w, h)| w > 0 && h > 0 && share(l.w, w) && share(l.h, h))
+fn occludes(l: &HLayer, work: Option<WinRect>) -> bool {
+    let canvas = work.is_some_and(|a| a.w > 0 && a.h > 0 && l.x <= a.x + SLIVER && l.y <= a.y + SLIVER && l.x + l.w >= a.right() - SLIVER && l.y + l.h >= a.bottom() - SLIVER);
+    l.w > SLIVER && l.h > SLIVER && !canvas
 }
 
 impl HyprDesktop {
@@ -307,13 +316,7 @@ impl Desktop for HyprDesktop {
     /// Each monitor minus what layers with an exclusive zone reserve (`reserved`).
     fn work_areas(&self, mons: &[Monitor]) -> Vec<Monitor> {
         let hm = self.mons();
-        mons.iter()
-            .map(|m| {
-                let r = hm.iter().find(|h| h.monitor(false).rect() == m.rect()).map(|h| h.reserved.clone()).unwrap_or_default();
-                let g = |i: usize| r.get(i).copied().unwrap_or(0);
-                Monitor { primary: m.primary, x: m.x + g(0), y: m.y + g(1), w: m.w - g(0) - g(2), h: m.h - g(1) - g(3) }
-            })
-            .collect()
+        mons.iter().map(|m| hm.iter().find(|h| h.monitor(false).rect() == m.rect()).map_or_else(|| m.clone(), |h| h.work_area(m.primary))).collect()
     }
 
     fn refresh_at(&self, x: i32, y: i32) -> Option<f32> {

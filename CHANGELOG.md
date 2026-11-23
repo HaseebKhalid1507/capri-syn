@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **Hyprland: she sits on windows again under shells that draw on one full-screen layer** (caelestia,
+  some quickshell setups). `perch sit` / `perch stand`, her flights and drag snaps used to end in
+  `edge hidden … exposed []`: the shell's transparent full-output layer counted as covering every
+  window. A layer that covers its output's whole work area, or one 2 px thin or less, no longer counts
+  as a cover; bars, docks, side panels and popups still do. A modal overlay that big (a launcher's or
+  logout screen's dimmer) doesn't count either, so she may sit on what it hides: `hyprctl layers`
+  doesn't say which layers take the keyboard.
+
 ## 1.2.0 (2026-11-23)
 
 She's restless, turns to another loop while she sits or stands, and changes outfit now and then. Her
