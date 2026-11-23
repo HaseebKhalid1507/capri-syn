@@ -376,11 +376,14 @@ On Linux the app grabs no global keys; the installer binds them for i3, sway and
 consent). On Hyprland it searches for `hyprland.lua` in `$XDG_CONFIG_HOME/hypr`,
 `~/.config/hypr`, `$XDG_CONFIG_DIRS` and `/etc/xdg/hypr`, then legacy `hyprland.conf`
 (Hyprland 0.57+ ignores `.conf`, so it warns). Lua gets literal `hl.bind` press/release
-bindings. Super+C taken? It offers Super+Alt+C; `--voice` adds Ctrl for the mic toggle.
+bindings, tagged `description = "synaps-avatar summon"` so live checks recognize them on reinstall.
+Super+C taken? It offers Super+Alt+C; `--voice` adds Ctrl for the mic toggle and checks that
+chord too. Both move to the Alt pair if either is taken; if that pair is occupied, nothing is added.
 It checks live `hyprctl binds -j` first, including helper/import-generated keys. Offline, it
-scans literal keys and stock `mainMod` concatenation; unresolved helpers, loops or imports
-are shown for manual setup, never assumed free. It backs up first, checks with `luac -p`
-when installed (restoring on failure), and removes only its marked blocks on uninstall.
+scans literal keys and stock `mainMod` concatenation; unresolved helpers, aliases, loops or imports
+are shown for manual setup, never assumed free. It backs up first and checks with `luac -p`
+when that compiler can parse the original config (restoring on a new syntax failure), and removes
+only its marked blocks on uninstall.
 
 By hand, in i3:
 
