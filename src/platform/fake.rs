@@ -50,6 +50,9 @@ struct World {
     fx: HashMap<usize, ((i32, i32), Vec<ShapeRect>)>,
     /// Like Hyprland today: no idle time of its own (the core counts from the pointer).
     no_idle: bool,
+    /// Like Hyprland: a change of her shape is just that, not a resize to fade over (not picom:
+    /// `Desktop::compositor_reshapes`).
+    no_reshapes: bool,
     /// He clicked on her since the keyboard last went back (`Caps::keyboard_on_input`).
     his_input: bool,
     /// The primary button as the server has it (None: can't tell).
@@ -159,9 +162,10 @@ impl Desktop for FakeDesktop {
     fn compositor_running(&self) -> bool {
         false
     }
-    /// A picom desktop (the core then keeps her region and her moves apart).
+    /// A picom desktop (the core then keeps her region and her moves apart), unless
+    /// `no_reshapes`.
     fn compositor_reshapes(&self) -> bool {
-        true
+        !self.0.w().no_reshapes
     }
     fn watch(&self, hint: Box<dyn Fn(Hint) + Send>) -> Result<()> {
         *self.0.hint.lock().map_err(|_| anyhow!("fake hint"))? = Some(hint);
@@ -738,17 +742,19 @@ fn effects_fit_in_her_window_when_composited() {
 }
 
 /// Like Hyprland on bella: a body host per output (eDP-1 2560×1600, DP-2 2560×1440 right of
-/// it), no implicit grab. She shows in `BODY` on eDP-1; `HOST_B` waits dormant on DP-2.
+/// it), no implicit grab, always alpha and not picom (her region and her moves go out at once:
+/// `Os::settling` is off). She shows in `BODY` on eDP-1; `HOST_B` waits dormant on DP-2.
 fn fake_hosts() -> (Os, FakeDriver) {
     let mons = vec![Monitor { primary: true, x: 0, y: 0, w: 2560, h: 1600 }, Monitor { primary: false, x: 2560, y: 0, w: 2560, h: 1440 }];
     let dormant = HashMap::from([(HOST_B, ((2560, 0), Vec::new()))]);
-    let world = World { root: (5120, 1600), monitors: mons.clone(), next: 100, body: BODY, dormant, ..World::default() };
+    let world = World { root: (5120, 1600), monitors: mons.clone(), next: 100, body: BODY, dormant, no_reshapes: true, ..World::default() };
     let caps = Caps { shape_mode: false, target_events: false, fx_layers: false, costly_redraw: true, implicit_grab: false, goal_geometry: true, layout_events: true, host_per_output: true, keyboard_on_input: false };
     let f = Arc::new(Fake { world: Mutex::new(world), hint: Mutex::new(None), session: Mutex::new(None), caps });
     let os = Os::new(Arc::new(FakeDesktop(f.clone())), Box::new(FakeStage(f.clone())));
     os.set_body_size(BODY_SIZE.0, BODY_SIZE.1);
     os.add_host(BODY, mons[0].clone());
     os.add_host(HOST_B, mons[1].clone());
+    assert!(!os.settling(), "Hyprland isn't picom: nothing of hers is held back");
     (os, FakeDriver(f))
 }
 
