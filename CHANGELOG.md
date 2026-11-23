@@ -19,6 +19,9 @@
   open instead of reporting no compatible adapter (not yet run on XWayland with NVIDIA). Single-GPU Wayland is also pinned to the
   compositor's GPU, but its Vulkan driver list is left unchanged; vendor narrowing is only
   for multi-GPU machines. Native X11 keeps its boot-VGA workaround.
+- **Hyprland: the Line and Settings grow to fit their contents** instead of staying at their
+  initial 120 px height with the input field or Settings rows cut off (#145). They remain overlay
+  layer surfaces, never tiled; no Hyprland config changes are needed.
 
 ## 1.2.0 (2026-11-23)
 

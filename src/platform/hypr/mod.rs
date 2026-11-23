@@ -4,9 +4,16 @@
 //! Every rule built on these answers is the core's (`platform/os.rs`); the core polls the perch
 //! target and paints effect layers in her window (`Caps`).
 
+mod geometry;
 mod ipc;
 #[cfg(test)]
+mod panel_test;
+#[cfg(test)]
 mod testkit;
+// Compile the vendored pure configure regression tests in the app's normal CI unit suite.
+#[cfg(test)]
+#[path = "../../../vendor/gpui-pre-linux/src/linux/wayland/layer_size.rs"]
+mod layer_size_tests;
 
 use super::{Caps, Desktop, FxZ, Hint, Monitor, MoveAnim, Place, PointerRead, Role, ShapeRect, Stage, Visible, Win, WinId, WinRect};
 use anyhow::{Context as _, Result, bail};
@@ -609,10 +616,13 @@ impl Stage for LayerStage {
         Ok(())
     }
 
-    /// The place of one of her other surfaces (its size follows its window; P3).
-    fn place(&self, s: WinId, x: i32, y: i32, _w: i32, _h: i32) -> Result<()> {
+    /// The core measures the Line (Settings is the same surface) after its first layout.
+    /// Margins alone leave its buffer at LINE_H0 forever (#145). Request its measured size
+    /// too; the layer configure resizes GPUI's viewport/buffer. No xdg toplevel to tile.
+    fn place(&self, s: WinId, x: i32, y: i32, w: i32, h: i32) -> Result<()> {
         if let Some(s) = self.surface(s) {
-            layer_ctl::set_margin(s.ptr, Self::margins(&s, x, y), Commit::WithFrame);
+            let size = geometry::layer_size(w, h, s.scale);
+            layer_ctl::set_bounds(s.ptr, Self::margins(&s, x, y), size, Commit::WithFrame);
         }
         Ok(())
     }
