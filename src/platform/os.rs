@@ -368,6 +368,22 @@ impl Os {
         o
     }
 
+    /// Per-moment windows must name the same output their margins are relative to.
+    /// A missing GPUI output is an error, never permission to open on the focused monitor.
+    pub fn panel_options(&self, role: Role, bounds: Bounds<Pixels>, focus: bool, cx: &gpui_kit::App) -> Result<WindowOptions> {
+        let mut options = self.window_options(role, bounds, focus);
+        self.stage.pin_output(&mut options, cx)?;
+        Ok(options)
+    }
+
+    pub fn panel_area(&self) -> Option<WinRect> {
+        self.stage.body_area()
+    }
+
+    pub fn panel_needs_reopen(&self, id: WinId) -> bool {
+        self.stage.needs_reopen(id)
+    }
+
     pub fn adopt(&self, role: Role, window: &Window) -> Result<WinId> {
         if role == Role::Body {
             let (v, sf) = (window.viewport_size(), window.scale_factor());

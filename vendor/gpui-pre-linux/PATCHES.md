@@ -49,4 +49,11 @@ interactivity once, at creation, and commits every input-region change on its ow
   Xdg toplevels/popups, other layers and other compositors retain their existing behavior.
   `layer_size.rs` holds the pure buffer/echo/resize policies and their unit tests.
 
+- **Panel output (#145 follow-up)** `output_id(surface)` returns the protocol id of the
+  `wl_output` passed at creation, before any surface-enter event. Hyprland per-moment layers
+  copy their active body host's id into `WindowOptions::display_id`; the existing client path
+  resolves it to the object passed to `get_layer_surface`. Without it Hyprland chose the
+  focused monitor but interpreted margins computed for her monitor, cutting off the field.
+  This accessor records only; it changes no default output-selection behavior elsewhere.
+
 Drop these if upstream GPUI grows runtime layer-surface setters.

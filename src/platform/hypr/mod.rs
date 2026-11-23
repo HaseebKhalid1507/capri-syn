@@ -536,6 +536,13 @@ impl LayerStage {
         self.surface(self.body.get())
     }
 
+    fn area_on(&self, output: (i32, i32)) -> Option<WinRect> {
+        let m = self.desk.mons().into_iter().find(|m| (m.x, m.y) == output)?;
+        let r = m.monitor(false).rect();
+        let g = |i: usize| m.reserved.get(i).copied().unwrap_or(0);
+        Some(WinRect::new(r.x + g(0), r.y + g(1), (r.w - g(0) - g(2)).max(1), (r.h - g(1) - g(3)).max(1)))
+    }
+
     fn margins(s: &Surface, x: i32, y: i32) -> [i32; 4] {
         let l = |v: i32, o: i32| ((v - o) as f32 / s.scale).round() as i32;
         [l(y, s.output.1), 0, 0, l(x, s.output.0)]
@@ -549,9 +556,19 @@ impl Stage for LayerStage {
     fn dress(&self, role: Role, o: &mut WindowOptions) {
         use gpui_kit::layer_shell::{Anchor, KeyboardInteractivity, Layer, LayerShellOptions};
         let ns = namespace(role);
-        let b = o.window_bounds.map(|b| b.get_bounds()).unwrap_or_default();
+        let mut b = o.window_bounds.map(|b| b.get_bounds()).unwrap_or_default();
+        // Per-moment surfaces belong to her current body host, not the panel's centre
+        // (which can lie off-screen during bootstrap) or the compositor's focus.
+        let host = (!matches!(role, Role::Body | Role::Fx)).then(|| self.body_surface()).flatten();
+        let (output, scale) = host.map(|s| (s.output, s.scale))
+            .unwrap_or_else(|| self.desk.output_at(f32::from(b.center().x), f32::from(b.center().y)));
+        if role == Role::Line && let Some(a) = self.area_on(output) {
+            let d = |v: Pixels| (f32::from(v) * scale).round() as i32;
+            let [x, y, w, h] = geometry::fit_bounds([d(b.origin.x), d(b.origin.y), d(b.size.width), d(b.size.height)], [a.x, a.y, a.w, a.h]);
+            b = Bounds::new(point(px(x as f32 / scale), px(y as f32 / scale)), size(px(w as f32 / scale), px(h as f32 / scale)));
+            o.window_bounds = Some(gpui_kit::WindowBounds::Windowed(b));
+        }
         let at = b.origin;
-        let (output, scale) = self.desk.output_at(f32::from(b.center().x), f32::from(b.center().y));
         self.dressed.borrow_mut().insert(ns, (output, scale));
         let m = |v: Pixels, o: i32| px(f32::from(v) - o as f32 / scale);
         o.kind = WindowKind::LayerShell(LayerShellOptions {
@@ -563,6 +580,37 @@ impl Stage for LayerStage {
             keyboard_interactivity: KeyboardInteractivity::None,
             ..Default::default()
         });
+    }
+
+    fn pin_output(&self, o: &mut WindowOptions, cx: &gpui_kit::App) -> Result<()> {
+        let WindowKind::LayerShell(layer) = &o.kind else { bail!("not a Hyprland layer") };
+        // Reuse the body's actual protocol object; no guessing from window centres,
+        // monitor indices, focus or mixed-scale coordinates.
+        if !matches!(layer.namespace.as_str(), "capri-body" | "capri-fx") {
+            let body = self.body_surface().context("no body host for the panel output")?;
+            let id = layer_ctl::output_id(body.ptr).context("body host has no explicit wl_output")?;
+            let display = gpui_kit::DisplayId::new(id);
+            anyhow::ensure!(cx.displays().iter().any(|d| d.id() == display), "body output disappeared; refusing focused-output fallback");
+            o.display_id = Some(display);
+            return Ok(());
+        }
+        let (origin, scale) = self.dressed.borrow().get(layer.namespace.as_str()).copied().context("layer has no output")?;
+        // This is GPUI's wl_output protocol id, NOT Hyprland's monitor id. client.rs
+        // resolves it to the wl_output passed to get_layer_surface. Never pass None.
+        let at = point(px(origin.0 as f32 / scale), px(origin.1 as f32 / scale));
+        o.display_id = Some(cx.displays().into_iter().find(|d| {
+            let p = d.bounds().origin;
+            (f32::from(p.x - at.x)).abs() < 1.0 && (f32::from(p.y - at.y)).abs() < 1.0
+        }).context("body output not yet advertised by GPUI; refusing focused-output fallback")?.id());
+        Ok(())
+    }
+
+    fn body_area(&self) -> Option<WinRect> {
+        self.area_on(self.body_surface()?.output)
+    }
+
+    fn needs_reopen(&self, id: WinId) -> bool {
+        self.surface(id).is_some_and(|s| geometry::needs_reopen(s.output, self.body_surface().map(|b| b.output)))
     }
 
     fn adopt(&self, role: Role, window: &Window) -> Result<WinId> {
@@ -621,6 +669,10 @@ impl Stage for LayerStage {
     /// width/height here; Reader follows and effect-host placement stay margin-only.
     fn place(&self, s: WinId, x: i32, y: i32, w: i32, h: i32) -> Result<()> {
         if let Some(s) = self.surface(s) {
+            let [x, y, w, h] = if s.ns == namespace(Role::Line) {
+                let a = self.area_on(s.output).context("Line output disappeared; recreate it on her body host")?;
+                geometry::fit_bounds([x, y, w, h], [a.x, a.y, a.w, a.h])
+            } else { [x, y, w, h] };
             let margins = Self::margins(&s, x, y);
             if let Some(size) = geometry::placed_size(s.ns, w, h, s.scale) {
                 layer_ctl::set_bounds(s.ptr, margins, size);
