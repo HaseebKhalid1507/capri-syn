@@ -36,51 +36,108 @@ are created at their output size; effect hosts start at 1×1 and `host::fx_hosts
 calls `Window::resize` when their bounds change. The reader estimates its height before opening.
 Those paths do not rely on a Line measurement reaching `place` to escape a 120 px bootstrap.
 
-## Change
+## Change (fixed, pending confirmation on Hyprland)
 
-Hyprland `place` now converts device dimensions to positive, rounded-up logical dimensions
-and calls the new vendored `layer_ctl::set_bounds`. It sends size and margins in one existing
-`Commit::WithFrame` transaction, including the idle commit fallback. The compositor's configure
-still drives GPUI's resize callback and buffer, rather than resizing only the application's
-bookkeeping. A late old configure is acknowledged/rendered normally, but its geometry echo
-cannot replace the latest explicit requested size. Only callers of this new layer setter opt in.
+Only `Role::Line` (`capri-line`, including Settings) opts into live dimensions in
+`LayerStage::place`. It converts device dimensions to positive logical pixels with
+`(v / scale - 1e-3).ceil()` (the tolerance prevents float noise adding a pixel).
+**Width is live too**, following placement instead of remaining frozen at opening width.
+Reader-follow and effect-host `place` remain margin-only, as before this PR. Effect hosts'
+existing `Window::resize` retains its original size/scale calculation. The pure scope test
+covers all six namespaces; no Reader-follow behavior change is included.
 
-No X11, Windows, xdg-toplevel/popup or other-compositor behavior changes. These panels stay
-on Overlay, outside tiling. No installer/config change is needed: `install.sh` already confines
-its summon binds and autostart lines to `block_put` markers, but a `windowrule` cannot size a
-layer-shell surface and would not repair this bug. No user rule is installed.
+The vendored `layer_ctl::set_bounds` queues GPUI's drawable resize without waiting for
+configure. Like `PlatformWindow::resize`, the callback runs outside the active App/frame
+borrow. Size and margins are queued with it, then a forced redraw presents the resized buffer
+and geometry together. There is no geometry-only idle commit: Hyprland would stretch the old
+120 px buffer to the new dimensions for a frame. The stale-configure guard covers the drawable
+as well as the geometry echo, so an older reply cannot restore a stretched old buffer.
+A subsequent `Window::resize` replaces the remembered request on this managed surface;
+unmanaged surfaces are not opted in. Configures are still acknowledged.
+
+No X11, Windows, xdg-toplevel/popup or other-compositor behavior changes. The shared Line height
+helper is a verbatim extraction of the original truncate-before-clamp expression, not a new
+policy on other backends. These panels stay on Overlay, outside tiling. No installer/config
+change is needed: `install.sh` already confines its summon binds/autostart to `block_put`
+markers, but a `windowrule` cannot size a layer surface or repair this bug. No rule is installed.
 
 ## Verification
 
-- Pure Rust tests: bootstrap → measured chat → Settings → shrink; 100%, 125%, 150%, 200%
-  conversion; dimensions never become zero; late old/zero configure; normal geometry unchanged.
-  Both pure modules can be tested with `rustc --edition 2024 --test` from a wrapper module.
-  The app's normal Linux unit suite also includes the vendored configure tests.
-- `platform::hypr::panel_test::contract_hypr_panels` opens the **real Line** and Settings through
-  GPUI with a deterministic transcript and draft, without art, a daemon, login or audio.
-  It exercises fresh chat, fresh Settings and both page swaps. It asserts the layer and GPUI
-  viewport grow to the measured content (chat at least 180 px; Settings at least 300 px), the
-  cog/input row or bottom CHAT control is inside the viewport, and the surface stays an overlay
-  absent from the xdg client list. It checks again after a later frame. On the old `place`, the
-  test must fail with `layer=120 viewport=120` despite a larger measured height.
+- Thirteen pure Rust tests cover bootstrap → chat → Settings → shrink; 100%, 125%, 150%, 200%
+  scale conversion and float noise; nonzero requests; Line-only scope; stale configure buffer
+  and echo protection; later `Window::resize`; unchanged unmanaged policy; and the original
+  truncate/clamp logic. The impossible `(0, 0)` **geometry echo** test is gone (the caller
+  clamps geometry first). Zero *requested* sizes remain tested at the conversion boundary.
+  The three pure modules can be tested with `rustc --edition 2024 --test` from a wrapper.
+- `platform::hypr::panel_test::contract_hypr_panels` opens the **real Line** and Settings with
+  deterministic transcript/draft, without art, daemon, login or audio. It uses the production
+  height helper (`lineview` truncation and work-area/minimum clamp) and `beside::place`, not
+  a raw `ceil(height * scale)` request. It covers fresh chat, fresh Settings and both swaps;
+  layer/viewport height (chat ≥180 px, Settings ≥300 px); visible bottom controls; overlay
+  membership, absent from xdg clients; delayed height stability; live width (780→620); and a
+  subsequent `Window::resize` to 640×700 that stays there after another configure/frame.
+- Atomic presentation is implemented client-side and stale-buffer policy is unit-tested;
+  the contract checks settled geometry, **not a captured per-frame visual proof**. Use
+  `WAYLAND_DEBUG=client` and/or a recording in the isolated rig if checking for transient stretch.
 
-Run the prebuilt app test binary on a provisioned, **non-personal** rig runner:
+### Exact rig run (prebuilt test harness; no Cargo on the rig host)
 
-```sh
-# Inside the existing bwrap rig; the command refuses a normal desktop session.
-tools/wlrig/run.sh env SA_CONTRACT_HYPR=1 /absolute/path/to/synaps_avatar-TEST_HASH \
-  --ignored --test-threads 1 --nocapture contract_hypr_panels
+Normal Linux CI now publishes **hypr-panel-contract-linux**, containing the **synaps-avatar
+unit-test executable**, renamed `synaps-avatar-tests`. This is not `synaps-avatar`, the normal
+application, and not the `synaps-client` harness. The archive preserves executable permissions,
+records `SOURCE_HEAD` (PR head), `HEAD` (CI's possibly synthetic merge), `SHA256SUMS`, and `ldd.txt`.
+Use the run ID for this PR's latest head, once its artifact is available; no waiting/polling is
+part of this change. A separately prebuilt matching `target/debug/deps/synaps_avatar-HASH`
+executable works too. Do not select a stale cached hash or the `.d`/`.rmeta` files.
+
+On the **Intel-render-node Linux box, over real seatless SSH**, in the checked-out PR worktree:
+
+```bash
+# RUN_ID is the compile/unit CI run for this PR head, reported with the push.
+export RUN_ID=REPLACE_WITH_REPORTED_CI_RUN
+export ART="$HOME/.cache/capri-hypr-145/$RUN_ID"
+mkdir -p "$ART"
+gh run download "$RUN_ID" -R HaseebKhalid1507/capri-syn \
+  -n hypr-panel-contract-linux -D "$ART"
+tar -xzf "$ART/hypr-panel-contract.tar.gz" -C "$ART"
+export BIN="$ART/hypr-panel-contract/synaps-avatar-tests"
+(cd "$(dirname "$BIN")" && sha256sum -c SHA256SUMS)
+test "$(cat "$ART/hypr-panel-contract/SOURCE_HEAD")" = "$(git rev-parse HEAD)"
+ldd "$BIN"   # Resolve any missing Linux runtime libraries before starting the sandbox.
+
+# The rig guards SSH/seat, Intel PCI 0000:00:02.0, memory/load and no running game.
+# Dependencies: bwrap, sway, Hyprland/hyprctl (Lua-config capable), Mesa Intel EGL/Vulkan,
+# dbus-daemon, python3, jq, coreutils, DejaVu Sans Mono + the binary's ldd dependencies.
+export RIG="$HOME/.cache/capri-hypr-panel-rig"  # dedicated path, removed by down.sh
+export LOGS="$ART/rig-logs"
+test ! -e "$RIG"  # don't tear down someone else's existing rig on an up.sh failure
+(
+  set -euo pipefail
+  trap 'tools/wlrig/down.sh "$LOGS"' EXIT
+  tools/wlrig/up.sh
+  tools/wlrig/run.sh env SA_CONTRACT_HYPR=1 RUST_BACKTRACE=1 \
+    timeout --kill-after=5s 90s "$BIN" \
+    --ignored --exact --test-threads 1 --nocapture \
+    platform::hypr::panel_test::contract_hypr_panels 2>&1 | tee "$RIG/out/panels.log"
+)
 ```
 
-This change was prepared without Cargo. The local rig startup was attempted inside its sandbox;
-`inner.sh` failed with `sway: command not found`, and `Hyprland` is absent too. No application was
-run on a user's desktop. At base a31885e the checked-in `ci.yml` runs the compile/unit suite, not
-`tools/wlrig`; the existing `contract_hypr` is ignored, and no repository self-hosted runner was
-listed. `sandbox.sh` also requires an Intel render node at PCI 0000:00:02.0 and Intel Vulkan;
-`up.sh` requires an SSH, seatless session. A stock GitHub-hosted Ubuntu runner cannot meet
-those requirements. The new panel contract is compile-checked by normal CI but requires that
-provisioned rig to execute. It has **not** been claimed as a successful live reproduction or
-compositor run.
+The rig strips the outer environment, so pass `SA_CONTRACT_HYPR` (and optional
+`WAYLAND_DEBUG=client`) **after `run.sh env`**, not before. The test refuses an ordinary desktop
+runtime. Use an absolute binary path outside `/tmp` (private inside the sandbox). Do not
+bypass the SSH/seat or GPU guards. No daemon credentials or real conversation are needed.
+`down.sh` retains logs at `$LOGS` and removes the dedicated rig directory.
+
+Expected contract time is a few seconds on a healthy rig, **not yet measured** here. There are
+ten bounded settling loops of at most 5 seconds (six page checks, two widths, two explicit
+resizes), plus ~1.4 seconds of delays and rendering/IPC time. The 90-second watchdog also
+catches startup/event-loop hangs. Rig startup has its own 30-second readiness bound; teardown
+normally takes <6 seconds. Allow about two minutes total, excluding artifact download.
+
+This change was prepared without Cargo or running anything on bella. The earlier local rig
+attempt failed with `sway: command not found`; `Hyprland` is absent too. At base a31885e CI
+compiled but did not run `tools/wlrig`; this remains a manual contract on the provisioned
+seatless Intel host. The revised contract has **not** been claimed as a successful live run.
 
 ## Reporter confirmation if the rig remains unavailable
 

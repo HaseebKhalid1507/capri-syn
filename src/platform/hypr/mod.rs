@@ -617,12 +617,16 @@ impl Stage for LayerStage {
     }
 
     /// The core measures the Line (Settings is the same surface) after its first layout.
-    /// Margins alone leave its buffer at LINE_H0 forever (#145). Request its measured size
-    /// too; the layer configure resizes GPUI's viewport/buffer. No xdg toplevel to tile.
+    /// Margins alone leave its buffer at LINE_H0 forever (#145). Only the Line gets live
+    /// width/height here; Reader follows and effect-host placement stay margin-only.
     fn place(&self, s: WinId, x: i32, y: i32, w: i32, h: i32) -> Result<()> {
         if let Some(s) = self.surface(s) {
-            let size = geometry::layer_size(w, h, s.scale);
-            layer_ctl::set_bounds(s.ptr, Self::margins(&s, x, y), size, Commit::WithFrame);
+            let margins = Self::margins(&s, x, y);
+            if let Some(size) = geometry::placed_size(s.ns, w, h, s.scale) {
+                layer_ctl::set_bounds(s.ptr, margins, size);
+            } else {
+                layer_ctl::set_margin(s.ptr, margins, Commit::WithFrame);
+            }
         }
         Ok(())
     }

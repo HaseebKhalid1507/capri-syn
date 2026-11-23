@@ -20,8 +20,7 @@ const TAP_GUARD: Duration = Duration::from_secs(1);
 const LINE_W: f32 = 780.0;
 /// Squeezed beside her, down to this wide (logical px); narrower, it goes above her or over.
 const LINE_MIN_W: f32 = 480.0;
-/// The least the Line is tall (logical px), and its gap to her.
-const LINE_MIN_H: f32 = 60.0;
+/// The Line's gap to her (logical px).
 const LINE_GAP: f32 = 12.0;
 /// The Line's first height (logical px), until it measures itself.
 const LINE_H0: f32 = 120.0;
@@ -1129,7 +1128,7 @@ impl Avatar {
                 if let Some(l) = &self.line {
                     // No taller than her work area allows (it scrolls inside).
                     let area_h = self.her_area().map_or(i32::MAX / 2, |a| a.h);
-                    let hd = ((h * sf) as i32).min(area_h - (36.0 * sf) as i32).max((LINE_MIN_H * sf) as i32);
+                    let hd = line_height::device_height(h, sf, area_h);
                     if hd != l.at.3 {
                         self.line_follow(Some(hd), cx);
                     }
