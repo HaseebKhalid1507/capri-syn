@@ -802,7 +802,7 @@ impl Line {
         self.input.update(cx, |input, cx| input.set_selected_range_with_direction(saved.selection.clone(), saved.reversed, cx));
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "linux"))]
     pub(crate) fn output_preedit_fixture(&mut self, window: &mut Window, cx: &mut Context<Line>) {
         self.input.update(cx, |input, cx| {
             gpui_kit::EntityInputHandler::replace_and_mark_text_in_range(input, Some(0..10), "入力", Some(2..2), window, cx);

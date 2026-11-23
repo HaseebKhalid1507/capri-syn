@@ -8,7 +8,7 @@
 use super::super::contract::{self, Driver};
 use super::super::{Os, Role, ShapeRect, WinId, WinRect};
 use super::HyprDesktop;
-use gpui_kit::{App, AppContext as _, AsyncApp, Bounds, Context, IntoElement, ParentElement as _, Render, Styled as _, WeakEntity, Window, canvas, div, point, px, size};
+use gpui_kit::{AnyWindowHandle, App, AppContext as _, AsyncApp, Bounds, Context, IntoElement, ParentElement as _, Render, Styled as _, WeakEntity, Window, canvas, div, point, px, size};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io::{BufRead as _, BufReader, Write as _};
@@ -322,6 +322,47 @@ pub(super) fn focus_output(name: &str) {
     assert!(mons.as_array().unwrap().iter().any(|m| m["name"] == name && m["focused"] == true), "focus must be on {name}: {mons}");
 }
 
+/// A real pointer probe on the 150% body host: surface input coordinates stay logical,
+/// not divided by buffer scale. Run before opening its Line so no panel hides the samples.
+pub(super) async fn fractional_input_region(os: &Os, body: AnyWindowHandle, cx: &mut AsyncApp) {
+    focus_output("HEADLESS-3");
+    let area = os.panel_area().expect("fractional body output");
+    let (x, y) = os.shown_at();
+    let mut world = World::start();
+    // wlworld's layer constructor lets the compositor pick the focused output.
+    world.cmd("layer capri-input-probe 0 0 2048 1280 bottom");
+    let until = Instant::now() + Duration::from_secs(5);
+    loop {
+        let layers: serde_json::Value = serde_json::from_str(&hyprctl(&["-j", "layers"])).expect("layers");
+        if layers["HEADLESS-3"]["levels"]["1"].as_array().is_some_and(|ls|
+            ls.iter().any(|l| l["namespace"] == "capri-input-probe")) { break; }
+        assert!(Instant::now() < until, "probe backdrop on HEADLESS-3: {layers}");
+        cx.background_executor().timer(Duration::from_millis(50)).await;
+    }
+    assert!(x >= area.x && y >= area.y && x + 500 <= area.right() && y + 708 <= area.bottom(), "whole fractional body in bounds");
+    for _ in 0..100 {
+        if body.update(cx, |_, w, _| (w.scale_factor() - 1.5).abs() < 0.01).unwrap() { break; }
+        cx.background_executor().timer(Duration::from_millis(50)).await;
+    }
+    assert!(body.update(cx, |_, w, _| (w.scale_factor() - 1.5).abs() < 0.01).unwrap(), "1.5x body drawable");
+    for input in [vec![(30, 30, 240, 240)], Vec::new()] {
+        os.set_shapes(Some(&input), None).expect("fractional input region");
+        body.update(cx, |_, window, _| {
+            use raw_window_handle::{HasWindowHandle as _, RawWindowHandle};
+            let RawWindowHandle::Wayland(h) = window.window_handle().unwrap().as_raw() else { panic!("Wayland body") };
+            gpui_linux::layer_ctl::commit_pending(h.surface.as_ptr() as usize);
+            window.request_animation_frame();
+        }).unwrap();
+        cx.background_executor().timer(Duration::from_millis(150)).await;
+        for (dx, dy, inside) in [(25, 25, false), (50, 50, true), (250, 250, true), (280, 280, false)] {
+            let got = world.cmd(&format!("probe {} {}", x + dx, y + dy));
+            let want = if inside && !input.is_empty() { "other" } else { "world capri-input-probe" };
+            assert_eq!(got, want, "1.5x input at ({dx},{dy}), empty={}", input.is_empty());
+        }
+    }
+    world.cmd("destroy capri-input-probe");
+}
+
 #[test]
 #[ignore = "needs the Wayland rig: tools/wlrig/run.sh env SA_CONTRACT_HYPR=1 <test binary> --ignored contract_hypr"]
 fn contract_hypr() {
@@ -332,7 +373,7 @@ fn contract_hypr() {
     let res = result.clone();
     gpui_kit::application().run(move |cx: &mut App| {
         let bounds = Bounds::new(point(px(BODY_AT.0 as f32), px(BODY_AT.1 as f32)), size(px(BODY_SIZE.0 as f32), px(BODY_SIZE.1 as f32)));
-        let options = os.window_options(Role::Body, bounds, false);
+        let options = crate::host::options(cx, &os, Role::Body, bounds).expect("production body output by name");
         let os2 = os.clone();
         let ptr = Rc::new(std::cell::Cell::new(0usize));
         let ptr2 = ptr.clone();

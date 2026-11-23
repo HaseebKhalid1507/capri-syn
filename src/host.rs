@@ -25,6 +25,27 @@ pub fn options(cx: &App, os: &Os, role: Role, bounds: Bounds<Pixels>) -> anyhow:
     os.panel_options(role, bounds, false, cx)
 }
 
+/// wl_output.done/name can lag hyprctl at startup. Yield to GPUI's event loop until the
+/// named output is complete; never block dispatch or silently bind to a different output.
+/// Keep the startup closure (pack/listener included) until it can run exactly once.
+pub fn when_ready(cx: &mut App, os: Rc<Os>, bounds: Bounds<Pixels>, start: impl FnOnce(WindowOptions, &mut App) + 'static) {
+    match options(cx, &os, Role::Body, bounds) {
+        Ok(options) => start(options, cx),
+        Err(e) => {
+            elog!("synaps-avatar: waiting for the body output's wl_output name: {e:#}");
+            cx.spawn(async move |cx| {
+                loop {
+                    cx.background_executor().timer(std::time::Duration::from_millis(50)).await;
+                    if let Ok(options) = cx.update(|cx| options(cx, &os, Role::Body, bounds)) {
+                        cx.update(|cx| start(options, cx));
+                        break;
+                    }
+                }
+            }).detach();
+        }
+    }
+}
+
 /// A host's id, view and window (`Avatar::add_host`).
 pub type Host = (WinId, WeakEntity<HostView>, AnyWindowHandle);
 

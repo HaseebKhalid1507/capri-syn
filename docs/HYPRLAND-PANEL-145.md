@@ -90,6 +90,10 @@ unmanaged surfaces are not opted in. Configures are still acknowledged.
   The earlier `output_id(body)` dependency is removed: an implicitly created body no longer
   disables every panel. `host::options` is shared by production and the contract. A genuinely
   unadvertised/removed output is still an error, not permission to use the focused output.
+  At startup, `host::when_ready` retries the name lookup every 50 ms, yielding to GPUI's
+  event loop so wl_output.name/done can arrive; it no longer exits on this startup race.
+  The application startup closure runs once after resolution; other backends remain immediate.
+  `main.rs` explicitly sets `sf=1` for per-output hosts, independent of GPUI's primary display.
 - Fractional-scale evidence from review: 2560×1600 @1.25 has Hyprland bounds 2048×1280, but
   GPUI divides by integer wl_output.scale=2 and reports 1280×800. Body centres beyond that
   smaller box used to get no display_id. Name identity is independent of this discrepancy.
@@ -110,6 +114,20 @@ unmanaged surfaces are not opted in. Configures are still acknowledged.
   Placement caches advance only after `Os::place` succeeds. Reader retains text/scroll/focus;
   chip reopens. Intro uses the current body host, as its comment now states.
 
+### Keyboard sequencing dependency (#152)
+
+Every #148 grab uses `Os::grab_keyboard`: initial Line open, landing reopen (including the
+unparked restore), Reader open/reopen, and deferred-open race paths. `LayerStage::dress`
+creates all layers with `KeyboardInteractivity::None`; no new direct Exclusive call is added.
+The shared held-press guard belongs to #152, not a second guard here.
+
+Pending until #152 merges: rebase and verify its choke point queues every grab while a
+press is held, runs the pending grab at release, **and demotes any not-yet-mapped Exclusive
+layer to None at press start**. A grab immediately after `open_window` can map up to about
+400 ms later; a new press can start between the request and mapping. Deferring panels to
+landing alone does not close that race. The #152 diff inspected for this update did not yet
+contain that guard; no claim is made that the race is fixed at this head.
+
 ### Input handoff limits (explicit)
 
 The ordinary chat field commits its currently displayed IME preedit via `unmark_text` before
@@ -120,7 +138,8 @@ are not transferred. **An unsent API key (Settings ▸ Brain) and a partly typed
 answer are dropped on output migration**; they must be re-entered. On a live-window handoff
 the old fields are cleared before removal; on window loss their entities are dropped. They
 are never copied into the ordinary draft or persisted/logged. Preserving these secret inputs
-is a follow-up, not a capability claimed by this PR.
+**in memory only** across output handoff is a follow-up, not a capability claimed by this PR.
+The follow-up must keep secret text out of ordinary drafts, logs and persistence.
 
 No X11, Windows, xdg-toplevel/popup or other-compositor behavior changes. The shared Line height
 helper is a verbatim extraction of the original truncate-before-clamp expression, not a new
@@ -154,7 +173,11 @@ markers, but a `windowrule` cannot size a layer surface or repair this bug. No r
   open, recreates the Line with its draft/history/page, and checks Reader/chip/Intro binding.
   Reader/chip/Intro use stand-ins; chat and Settings are the real views. These output assertions
   fail on 5c89162, even though that head's height-only assertions can pass. The fractional
-  output asserts viewport/layer dimensions agree, and a handoff exercises composed text,
+  output asserts viewport/layer dimensions agree. Its body is at (6620,500), bottom 1208,
+  wholly inside HEADLESS-3 (logical bottom 1280); its centre still lies outside GPUI's
+  integer-scale x bounds. A virtual-pointer probe checks the 1.5x body's logical input
+  rectangle at its near/far inside edges and outside edges, plus empty-region pass-through.
+  `contract_hypr` also creates its body via `host::options`. A handoff exercises composed text,
   reversed selection, then a closed-window draft read. **This contract is pending**: no rig
   or app build was run locally; the maintainer will schedule it after CI builds the harness.
 - Atomic presentation is implemented client-side and stale-buffer policy is unit-tested;

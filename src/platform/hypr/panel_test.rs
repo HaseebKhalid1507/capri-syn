@@ -2,7 +2,7 @@
 //! Run only inside tools/wlrig (the guard is shared with contract_hypr).
 
 use super::super::{Os, Role, WinId, WinRect};
-use super::testkit::{focus_output, hyprctl, panel_outputs, require_rig};
+use super::testkit::{fractional_input_region, focus_output, hyprctl, panel_outputs, require_rig};
 use crate::beside::{self, Panel};
 use crate::line::{Ask, Line, Page, Prefs, Row, Snap, Who};
 use crate::view::line_height;
@@ -178,9 +178,9 @@ fn contract_hypr_panels() {
         let bodies: Vec<_> = [0.0, 2560.0, 5120.0]
             .into_iter()
             .map(|x| {
-                // On the 1.5x output the centre is beyond GPUI's integer-scale
-                // 1536x960 bounds but within Hyprland's 2048x1280 logical output.
-                let (dx, y) = if x == 5120.0 { (1500.0, 750.0) } else { (760.0, 914.0) };
+                // On the 1.5x output the centre's x is beyond GPUI's integer-scale
+                // 1536-wide bounds; the whole body fits Hyprland's 2048x1280 output.
+                let (dx, y) = if x == 5120.0 { (1500.0, 500.0) } else { (760.0, 914.0) };
                 let bounds = Bounds::new(point(px(x + dx), px(y)), size(px(500.0), px(708.0)));
                 let options = crate::host::options(cx, &os, Role::Body, bounds).expect("production body output by name");
                 let os = os.clone();
@@ -359,7 +359,8 @@ fn contract_hypr_panels() {
                     cx.background_executor().timer(Duration::from_millis(100)).await;
                 }
             }
-            cx.update(|_| os.move_now(6620, 750)).expect("body on fractional output");
+            cx.update(|_| os.move_now(6620, 500)).expect("body on fractional output");
+            fractional_input_region(&os, bodies[2].into(), cx).await;
             focus_output("WAYLAND-1");
             let fractional = cx.update(|cx| open_panel(cx, os.clone(), Page::Settings, "fractional draft".into(), Vec::new()));
             let mut settled = false;
