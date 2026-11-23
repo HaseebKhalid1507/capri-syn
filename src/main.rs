@@ -507,243 +507,248 @@ fn run(t_start: Instant) -> Result<()> {
         {
             elog!("synaps-avatar: pack fonts not loaded: {e:#}");
         }
-        // GPUI's primary display is its device px divided by its scale factor.
+        // Per-output hosts use Hyprland logical coordinates; GPUI scales their buffers.
+        // Other backends keep their device/GPUI primary-display ratio.
+        let hosts = os.host_per_output();
         let display_w = cx.primary_display().map(|d| f32::from(d.bounds().size.width)).unwrap_or(0.0);
-        let sf = if display_w > 0.0 { os.primary_display_px() as f32 / display_w } else { 1.0 };
+        let sf = if hosts { 1.0 } else if display_w > 0.0 { os.primary_display_px() as f32 / display_w } else { 1.0 };
         let layout = view::Layout::new(&pack, sf, args.height);
         let origin = state::load_ground()
             .map(|(gx, gy)| view::Avatar::clamp(&os, &layout, (gx - layout.ground_x, gy - layout.ground_y)))
             .unwrap_or_else(|| view::Avatar::default_origin(&os, &layout));
 
         let bounds = Bounds::new(point(px(origin.0 as f32 / sf), px(origin.1 as f32 / sf)), size(px(layout.win_w as f32 / sf), px(layout.win_h as f32 / sf)));
-        let mut options = os.window_options(platform::Role::Body, bounds, false);
-        let hosts = os.host_per_output();
-        if hosts {
-            options.display_id = host::display_for(cx, bounds);
-        }
-
-        let (tx, rx) = async_channel::unbounded::<(control::Command, control::Reply)>();
-        let mut built = None;
-        let pack2 = pack.clone();
-        let tx2 = tx.clone();
-        let build = |window: &mut Window, cx: &mut App| {
-            let win = match os.adopt(platform::Role::Body, window) {
-                Ok(w) => w,
-                Err(e) => fatal(startfail::Why::Other, e),
-            };
-            os.force_composited(env_composited().unwrap_or_else(|| settings::Settings::load().ok().and_then(|s| s.display.composited)));
-            // Nothing clickable until the first frame is decoded. Keep one pixel visible:
-            // an empty bounding shape makes X report the window fully obscured, and GPUI
-            // stops drawing a window it thinks is hidden.
-            let px1 = (layout.ground_x as i16, (layout.ground_y - 1) as i16, 1, 1);
-            os.set_shapes(Some(&[]), Some(&[px1])).ok();
-            os.move_to(origin.0, origin.1).ok();
-            os.raise().ok();
-            let tx = tx2.clone();
-            os.spawn_watcher(move |ev| {
-                let (r, _) = std::sync::mpsc::channel();
-                tx.send_blocking((control::Command::Watch(ev), r)).ok();
-            })
-            .map_err(|e| elog!("synaps-avatar: watcher: {e:#}"))
-            .ok();
-            // A click outside the Line parks it (her window keeps the keyboard when he clicks
-            // back into the window the WM already thinks is focused).
-            let tx = tx2.clone();
-            os.watch_clicks(move |x, y| {
-                let (r, _) = std::sync::mpsc::channel();
-                tx.send_blocking((control::Command::Watch(platform::WatchEvent::Click(x, y)), r)).ok();
-            })
-            .map_err(|e| elog!("synaps-avatar: click watcher: {e:#}; a click elsewhere won't park the Line"))
-            .ok();
-            // Escape while the intro plays skips it.
-            let tx = tx2.clone();
-            os.watch_escape(move || {
-                let (r, _) = std::sync::mpsc::channel();
-                tx.send_blocking((control::Command::Watch(platform::WatchEvent::Escape), r)).ok();
-            });
-            // The pointer near her, swiping past, resting on her (her lively reactions).
-            let tx = tx2.clone();
-            let sf = layout.sf;
-            let cfg = platform::pointer::cfg(sf);
-            os.watch_pointer(cfg, move |p| {
-                let (r, _) = std::sync::mpsc::channel();
-                tx.send_blocking((control::Command::Watch(platform::WatchEvent::Pointer(p)), r)).ok();
-            })
-            .map_err(|e| elog!("synaps-avatar: pointer watcher: {e:#}"))
-            .ok();
-            // Her global keys, where the backend grabs them itself (else his desktop binds them
-            // to `capri-ctl talk ...`). A grabbed key reports its press only (the summon key is a
-            // tap), or with `[voice] hold_to_talk` its press and release too. Never under test.
-            if std::env::var_os("SA_BRAIN_SYNTH").is_none() {
+        let startup_os = os.clone();
+        let start = move |options, cx: &mut App| {
+            let (tx, rx) = async_channel::unbounded::<(control::Command, control::Reply)>();
+            let mut built = None;
+            let pack2 = pack.clone();
+            let tx2 = tx.clone();
+            let build = |window: &mut Window, cx: &mut App| {
+                let win = match os.adopt(platform::Role::Body, window) {
+                    Ok(w) => w,
+                    Err(e) => fatal(startfail::Why::Other, e),
+                };
+                os.force_composited(env_composited().unwrap_or_else(|| settings::Settings::load().ok().and_then(|s| s.display.composited)));
+                // Nothing clickable until the first frame is decoded. Keep one pixel visible:
+                // an empty bounding shape makes X report the window fully obscured, and GPUI
+                // stops drawing a window it thinks is hidden.
+                let px1 = (layout.ground_x as i16, (layout.ground_y - 1) as i16, 1, 1);
+                os.set_shapes(Some(&[]), Some(&[px1])).ok();
+                os.move_to(origin.0, origin.1).ok();
+                os.raise().ok();
                 let tx = tx2.clone();
-                let v = settings::Settings::load().map(|s| s.voice).unwrap_or_default();
-                let keys = platform::Keys { summon: v.key, toggle: v.toggle_key, hold: v.hold_to_talk };
-                os.watch_keys(keys, move |k| {
-                    let cmd = match k {
-                        platform::KeyEv::Summon => control::Command::TalkTap,
-                        platform::KeyEv::TalkToggle => control::Command::TalkToggle,
-                        platform::KeyEv::TalkPress => control::Command::Talk(true),
-                        platform::KeyEv::TalkRelease => control::Command::Talk(false),
-                    };
-                    let (r, _) = std::sync::mpsc::channel();
-                    tx.send_blocking((cmd, r)).ok();
-                })
-                .map_err(|e| elog!("synaps-avatar: global keys: {e:#}"))
-                .ok();
-            }
-            // His presence: the screen locked, the machine asleep (logind; never under test).
-            if std::env::var_os("SA_BRAIN_SYNTH").is_none() {
-                let tx = tx2.clone();
-                os.watch_session(move |ev| {
+                os.spawn_watcher(move |ev| {
                     let (r, _) = std::sync::mpsc::channel();
                     tx.send_blocking((control::Command::Watch(ev), r)).ok();
                 })
-                .map_err(|e| elog!("synaps-avatar: session watcher: {e:#}; a lock won't put her to sleep at once"))
+                .map_err(|e| elog!("synaps-avatar: watcher: {e:#}"))
                 .ok();
-            }
-            // Her icon in the tray (Windows' notification area; none on Linux yet): a click is
-            // her summon key's tap, its menu is her menu (`menu`). The icon by its one rule
-            // (`brand::icon`). Never under test. Another of her on another control socket
-            // (`XDG_RUNTIME_DIR`) has an icon of her own.
-            if std::env::var_os("SA_BRAIN_SYNTH").is_none() {
+                // A click outside the Line parks it (her window keeps the keyboard when he clicks
+                // back into the window the WM already thinks is focused).
                 let tx = tx2.clone();
-                let icon = brand::icon(brand::pack_icon(&pack2).as_deref());
-                if icon.file.is_some() {
-                    elog!("synaps-avatar: her icon: {}", icon.source());
-                }
-                let instance = std::env::var_os("XDG_RUNTIME_DIR").map(|_| control::socket_path().display().to_string()).unwrap_or_default();
-                if let Err(e) = os.start_tray(icon.tray(), &instance, move |ev| {
-                    if let Some(cmd) = menu::command_for(ev) {
-                        let (r, _) = std::sync::mpsc::channel();
-                        // Unbounded: never waits (this runs on the tray's thread).
-                        tx.try_send((cmd, r)).ok();
-                    }
-                }) {
-                    elog!("synaps-avatar: tray: {e:#} (HIDE's chip still brings her back)");
-                }
-            }
-            // Real LISTENING: his media players, as the OS reports them. Tests see only their
-            // own fake player (SA_MPRIS_ONLY), never his.
-            let music = settings::Settings::load().map(|s| s.music).unwrap_or_default();
-            let only = std::env::var("SA_MPRIS_ONLY").ok().filter(|s| !s.is_empty());
-            let synth = std::env::var_os("SA_BRAIN_SYNTH").is_some();
-            if music.detect && (only.is_some() || !synth) {
-                let tx = tx2.clone();
-                let filter = media::Filter { ignore: music.ignore, only };
-                if let Err(e) = platform::watch_media(filter, move |p| {
+                os.watch_clicks(move |x, y| {
                     let (r, _) = std::sync::mpsc::channel();
-                    tx.send_blocking((control::Command::Playback(p), r)).ok();
-                }) {
-                    // The platform's watcher names itself (`mpris: ...`, `smtc: ...`).
-                    elog!("synaps-avatar: {e:#} (no music detection)");
+                    tx.send_blocking((control::Command::Watch(platform::WatchEvent::Click(x, y)), r)).ok();
+                })
+                .map_err(|e| elog!("synaps-avatar: click watcher: {e:#}; a click elsewhere won't park the Line"))
+                .ok();
+                // Escape while the intro plays skips it.
+                let tx = tx2.clone();
+                os.watch_escape(move || {
+                    let (r, _) = std::sync::mpsc::channel();
+                    tx.send_blocking((control::Command::Watch(platform::WatchEvent::Escape), r)).ok();
+                });
+                // The pointer near her, swiping past, resting on her (her lively reactions).
+                let tx = tx2.clone();
+                let sf = layout.sf;
+                let cfg = platform::pointer::cfg(sf);
+                os.watch_pointer(cfg, move |p| {
+                    let (r, _) = std::sync::mpsc::channel();
+                    tx.send_blocking((control::Command::Watch(platform::WatchEvent::Pointer(p)), r)).ok();
+                })
+                .map_err(|e| elog!("synaps-avatar: pointer watcher: {e:#}"))
+                .ok();
+                // Her global keys, where the backend grabs them itself (else his desktop binds them
+                // to `capri-ctl talk ...`). A grabbed key reports its press only (the summon key is a
+                // tap), or with `[voice] hold_to_talk` its press and release too. Never under test.
+                if std::env::var_os("SA_BRAIN_SYNTH").is_none() {
+                    let tx = tx2.clone();
+                    let v = settings::Settings::load().map(|s| s.voice).unwrap_or_default();
+                    let keys = platform::Keys { summon: v.key, toggle: v.toggle_key, hold: v.hold_to_talk };
+                    os.watch_keys(keys, move |k| {
+                        let cmd = match k {
+                            platform::KeyEv::Summon => control::Command::TalkTap,
+                            platform::KeyEv::TalkToggle => control::Command::TalkToggle,
+                            platform::KeyEv::TalkPress => control::Command::Talk(true),
+                            platform::KeyEv::TalkRelease => control::Command::Talk(false),
+                        };
+                        let (r, _) = std::sync::mpsc::channel();
+                        tx.send_blocking((cmd, r)).ok();
+                    })
+                    .map_err(|e| elog!("synaps-avatar: global keys: {e:#}"))
+                    .ok();
                 }
+                // His presence: the screen locked, the machine asleep (logind; never under test).
+                if std::env::var_os("SA_BRAIN_SYNTH").is_none() {
+                    let tx = tx2.clone();
+                    os.watch_session(move |ev| {
+                        let (r, _) = std::sync::mpsc::channel();
+                        tx.send_blocking((control::Command::Watch(ev), r)).ok();
+                    })
+                    .map_err(|e| elog!("synaps-avatar: session watcher: {e:#}; a lock won't put her to sleep at once"))
+                    .ok();
+                }
+                // Her icon in the tray (Windows' notification area; none on Linux yet): a click is
+                // her summon key's tap, its menu is her menu (`menu`). The icon by its one rule
+                // (`brand::icon`). Never under test. Another of her on another control socket
+                // (`XDG_RUNTIME_DIR`) has an icon of her own.
+                if std::env::var_os("SA_BRAIN_SYNTH").is_none() {
+                    let tx = tx2.clone();
+                    let icon = brand::icon(brand::pack_icon(&pack2).as_deref());
+                    if icon.file.is_some() {
+                        elog!("synaps-avatar: her icon: {}", icon.source());
+                    }
+                    let instance = std::env::var_os("XDG_RUNTIME_DIR").map(|_| control::socket_path().display().to_string()).unwrap_or_default();
+                    if let Err(e) = os.start_tray(icon.tray(), &instance, move |ev| {
+                        if let Some(cmd) = menu::command_for(ev) {
+                            let (r, _) = std::sync::mpsc::channel();
+                            // Unbounded: never waits (this runs on the tray's thread).
+                            tx.try_send((cmd, r)).ok();
+                        }
+                    }) {
+                        elog!("synaps-avatar: tray: {e:#} (HIDE's chip still brings her back)");
+                    }
+                }
+                // Real LISTENING: his media players, as the OS reports them. Tests see only their
+                // own fake player (SA_MPRIS_ONLY), never his.
+                let music = settings::Settings::load().map(|s| s.music).unwrap_or_default();
+                let only = std::env::var("SA_MPRIS_ONLY").ok().filter(|s| !s.is_empty());
+                let synth = std::env::var_os("SA_BRAIN_SYNTH").is_some();
+                if music.detect && (only.is_some() || !synth) {
+                    let tx = tx2.clone();
+                    let filter = media::Filter { ignore: music.ignore, only };
+                    if let Err(e) = platform::watch_media(filter, move |p| {
+                        let (r, _) = std::sync::mpsc::channel();
+                        tx.send_blocking((control::Command::Playback(p), r)).ok();
+                    }) {
+                        // The platform's watcher names itself (`mpris: ...`, `smtc: ...`).
+                        elog!("synaps-avatar: {e:#} (no music detection)");
+                    }
+                }
+                elog!(
+                    "synaps-avatar: pack `{}` ({} frames) sf {sf:.3} window 0x{win:x} {}x{} at {},{} composited={} (pack load {t_pack} ms)",
+                    pack2.name,
+                    pack2.frames.len(),
+                    layout.win_w,
+                    layout.win_h,
+                    origin.0,
+                    origin.1,
+                    os.composited()
+                );
+                let init = view::Init { pack: pack2.clone(), layout, os: os.clone(), name, origin, t_start, focus_probe: args.focus_probe };
+                let view = cx.new(|cx| view::Avatar::new(init, window, cx));
+                built = Some(view.clone());
+                view
+            };
+            // One window, or (`Caps::host_per_output`) her host on this output, the others dormant.
+            let mut first = None;
+            let opened: Result<AnyWindowHandle> = if hosts {
+                cx.open_window(options, |window, cx| {
+                    let v = build(window, cx);
+                    let h = cx.new(|_| host::HostView { avatar: v, active: true });
+                    first = Some(h.downgrade());
+                    h
+                })
+                .map(Into::into)
+            } else {
+                cx.open_window(options, build).map(Into::into)
+            };
+            if let Err(e) = opened {
+                fatal(startfail::Why::Other, e.context("cannot open the window"));
             }
-            elog!(
-                "synaps-avatar: pack `{}` ({} frames) sf {sf:.3} window 0x{win:x} {}x{} at {},{} composited={} (pack load {t_pack} ms)",
-                pack2.name,
-                pack2.frames.len(),
-                layout.win_w,
-                layout.win_h,
-                origin.0,
-                origin.1,
-                os.composited()
-            );
-            let init = view::Init { pack: pack2.clone(), layout, os: os.clone(), name, origin, t_start, focus_probe: args.focus_probe };
-            let view = cx.new(|cx| view::Avatar::new(init, window, cx));
-            built = Some(view.clone());
-            view
-        };
-        // One window, or (`Caps::host_per_output`) her host on this output, the others dormant.
-        let mut first = None;
-        let opened: Result<AnyWindowHandle> = if hosts {
-            cx.open_window(options, |window, cx| {
-                let v = build(window, cx);
-                let h = cx.new(|_| host::HostView { avatar: v, active: true });
-                first = Some(h.downgrade());
-                h
+            let view = built.expect("window built");
+            if let (Ok(w), Some(h)) = (&opened, first) {
+                let size = (layout.win_w, layout.win_h);
+                let mut all = vec![(os.body(), h, *w)];
+                for m in os.hosts_wanted() {
+                    all.extend(host::open_dormant(cx, &os, &view, &m, size, sf));
+                }
+                let fx = host::open_fx_hosts(cx, &os, sf);
+                elog!("synaps-avatar: {} body hosts, {} effect hosts (one each per output)", all.len(), fx.len());
+                view.update(cx, |v, _| {
+                    all.into_iter().for_each(|h| v.add_host(h));
+                    v.set_fx_hosts(fx);
+                });
+            }
+
+            // Decode: the default frame first so something shows quickly, then the rest.
+            let geo = layout.geo;
+            let (verify, threads) = (args.verify, args.threads);
+            let decode_view = view.clone();
+            let p = pack.clone();
+            cx.spawn(async move |cx| {
+                let default = p.frame(&p.catalog.default_sprite).unwrap_or(0);
+                let p1 = p.clone();
+                let first = off_thread(move || frames::decode(&p1, &geo, &[default], verify, 1)).await;
+                let first = match first {
+                    Ok(d) => d,
+                    Err(e) => fatal(startfail::Why::Pack, e),
+                };
+                decode_view.update(cx, |v, cx| v.add_frames(vec![(default, first.frames.into_iter().next().unwrap())], false, cx));
+                // A strip's cells are decoded when a pool shows them (the view asks).
+                let rest: Vec<usize> = (0..p.frames.len()).filter(|&i| i != default && p.frames[i].cell.is_none()).collect();
+                let p2 = p.clone();
+                let rest2 = rest.clone();
+                let all = off_thread(move || frames::decode(&p2, &geo, &rest2, verify, threads)).await;
+                let all = match all {
+                    Ok(d) => d,
+                    Err(e) => fatal(startfail::Why::Pack, e),
+                };
+                elog!(
+                    "synaps-avatar: decoded {} frames ({:.1} MB) in {} ms on {threads} threads; all frames ready {} ms after start",
+                    all.frames.len(),
+                    all.frames.iter().map(|f| f.bytes()).sum::<usize>() as f64 / 1e6,
+                    all.decode_ms,
+                    t_start.elapsed().as_millis()
+                );
+                decode_view.update(cx, |v, cx| v.add_frames(rest.into_iter().zip(all.frames).collect(), true, cx));
+                if let Some(m) = p.behaviour.music.clone() {
+                    let p3 = p.clone();
+                    let size = crate::view::note_px(&geo);
+                    match off_thread(move || frames::decode_notes(&p3, &m.notes, size)).await {
+                        Ok(notes) => decode_view.update(cx, |v, _| v.set_notes(notes)),
+                        Err(e) => elog!("synaps-avatar: music notes unavailable: {e:#}"),
+                    }
+                }
+                // Hands freed decode buffers back to the OS.
+                platform::trim_heap();
             })
-            .map(Into::into)
-        } else {
-            cx.open_window(options, build).map(Into::into)
-        };
-        if let Err(e) = opened {
-            fatal(startfail::Why::Other, e.context("cannot open the window"));
-        }
-        let view = built.expect("window built");
-        if let (Ok(w), Some(h)) = (&opened, first) {
-            let size = (layout.win_w, layout.win_h);
-            let mut all = vec![(os.body(), h, *w)];
-            for m in os.hosts_wanted() {
-                all.extend(host::open_dormant(cx, &os, &view, &m, size, sf));
-            }
-            let fx = host::open_fx_hosts(cx, &os, sf);
-            elog!("synaps-avatar: {} body hosts, {} effect hosts (one each per output)", all.len(), fx.len());
-            view.update(cx, |v, _| {
-                all.into_iter().for_each(|h| v.add_host(h));
-                v.set_fx_hosts(fx);
-            });
-        }
+            .detach();
 
-        // Decode: the default frame first so something shows quickly, then the rest.
-        let geo = layout.geo;
-        let (verify, threads) = (args.verify, args.threads);
-        let decode_view = view.clone();
-        let p = pack.clone();
-        cx.spawn(async move |cx| {
-            let default = p.frame(&p.catalog.default_sprite).unwrap_or(0);
-            let p1 = p.clone();
-            let first = off_thread(move || frames::decode(&p1, &geo, &[default], verify, 1)).await;
-            let first = match first {
-                Ok(d) => d,
-                Err(e) => fatal(startfail::Why::Pack, e),
-            };
-            decode_view.update(cx, |v, cx| v.add_frames(vec![(default, first.frames.into_iter().next().unwrap())], false, cx));
-            // A strip's cells are decoded when a pool shows them (the view asks).
-            let rest: Vec<usize> = (0..p.frames.len()).filter(|&i| i != default && p.frames[i].cell.is_none()).collect();
-            let p2 = p.clone();
-            let rest2 = rest.clone();
-            let all = off_thread(move || frames::decode(&p2, &geo, &rest2, verify, threads)).await;
-            let all = match all {
-                Ok(d) => d,
-                Err(e) => fatal(startfail::Why::Pack, e),
-            };
-            elog!(
-                "synaps-avatar: decoded {} frames ({:.1} MB) in {} ms on {threads} threads; all frames ready {} ms after start",
-                all.frames.len(),
-                all.frames.iter().map(|f| f.bytes()).sum::<usize>() as f64 / 1e6,
-                all.decode_ms,
-                t_start.elapsed().as_millis()
-            );
-            decode_view.update(cx, |v, cx| v.add_frames(rest.into_iter().zip(all.frames).collect(), true, cx));
-            if let Some(m) = p.behaviour.music.clone() {
-                let p3 = p.clone();
-                let size = crate::view::note_px(&geo);
-                match off_thread(move || frames::decode_notes(&p3, &m.notes, size)).await {
-                    Ok(notes) => decode_view.update(cx, |v, _| v.set_notes(notes)),
-                    Err(e) => elog!("synaps-avatar: music notes unavailable: {e:#}"),
+            if !args.no_session {
+                if session::guarded(&who(&pack.name)) {
+                    fatal(startfail::Why::Pack, anyhow::anyhow!("this pack's character is called `{}`: that is the guarded session's name", pack.name));
                 }
+                let persona = persona_for(&args, &pack.dir);
+                connect_session(&args, &pack.name, persona, &view, cx);
             }
-            // Hands freed decode buffers back to the OS.
-            platform::trim_heap();
-        })
-        .detach();
 
-        if !args.no_session {
-            if session::guarded(&who(&pack.name)) {
-                fatal(startfail::Why::Pack, anyhow::anyhow!("this pack's character is called `{}`: that is the guarded session's name", pack.name));
-            }
-            let persona = persona_for(&args, &pack.dir);
-            connect_session(&args, &pack.name, persona, &view, cx);
+            control::serve(listener, tx);
+            cx.spawn(async move |cx| {
+                while let Ok((cmd, reply)) = rx.recv().await {
+                    let r = view.update(cx, |v, cx| v.apply(cmd, cx));
+                    reply.send(r).ok();
+                }
+            })
+            .detach();
+        };
+        if hosts {
+            host::when_ready(cx, startup_os, bounds, start);
+        } else {
+            let options = startup_os.window_options(platform::Role::Body, bounds, false);
+            start(options, cx);
         }
-
-        control::serve(listener, tx);
-        cx.spawn(async move |cx| {
-            while let Ok((cmd, reply)) = rx.recv().await {
-                let r = view.update(cx, |v, cx| v.apply(cmd, cx));
-                reply.send(r).ok();
-            }
-        })
-        .detach();
     });
     // Windows: nothing past GPUI's run (her state is saved: `finish_quit`). ExitProcess would run
     // every DLL's detach, and a GPU driver's can hold her there, her exe still mapped.

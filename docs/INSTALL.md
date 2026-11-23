@@ -214,8 +214,17 @@ she runs through XWayland, the X server those desktops keep for X apps.
   None of them has been tried on a real session yet: CI and the test containers stand in for them.
 - **Hyprland** has no idle time for her yet: your presence is the pointer moving, so typing alone
   for 5 min reads as away. Hyprland before 0.40 isn't supported: she takes XWayland there.
-- **Hyprland: the Line and Settings can open cut short**, with no room to type
-  ([#145](https://github.com/HaseebKhalid1507/capri-syn/issues/145)). Being looked at.
+- **Hyprland: the Line and Settings could open cut short in 1.2.0 and earlier**, with no room
+  to type ([#145](https://github.com/HaseebKhalid1507/capri-syn/issues/145)). **Fixed after 1.2.0,
+  output fix pending confirmation:** the first real run confirmed content-height growth,
+  but exposed a second issue on two monitors: the panel used her offsets on the focused
+  output instead of hers, hiding the field below its bottom edge. Per-moment layers now name
+  her body's output; open panels are recreated when she changes outputs, and the Line fits
+  its output's usable edges. No `windowrule` or config edit is needed; chat and Settings use
+  the same overlay layer, not a tiled window. Hosts/panels match output names at fractional
+  scale; open panels migrate after landing, retaining chat draft/selection and height.
+  Unsent API-key/hidden-prompt text must be re-entered after migration; see
+  [the investigation and pending rig contract](HYPRLAND-PANEL-145.md).
 - **On Windows, Synaps 0.12's own `synaps login`** opens a sign-in tab cut at the URL's first `&`:
   copy the whole URL it prints into your browser, or sign in from her (Settings ▸ Brain) or through
   her installers' step, which open it whole (install.ps1 puts it there too; the default folder

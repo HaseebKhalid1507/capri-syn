@@ -1173,11 +1173,17 @@ impl WaylandWindowStatePtr {
             .map(|v| f32::from(v) as i32)
             .map_size(|v| if v <= 0 { 1 } else { v });
 
+            // Only layer_ctl::set_bounds opts in. Ack the compositor's configure,
+            // but keep the latest requested size if this reply was already in flight.
+            let (width, height) = super::layer_size::configure_request(
+                self.ctl.requested_size.get(),
+                (window_geometry.size.width, window_geometry.size.height),
+            );
             state.surface_state.set_geometry(
                 window_geometry.origin.x,
                 window_geometry.origin.y,
-                window_geometry.size.width,
-                window_geometry.size.height,
+                width,
+                height,
             );
 
             let initial_configure = self.frame_loop.get() == FrameLoop::Unconfigured;
@@ -1353,11 +1359,11 @@ impl WaylandWindowStatePtr {
                 height,
                 serial,
             } => {
-                let size = if width == 0 || height == 0 {
-                    None
-                } else {
-                    Some(size(px(width as f32), px(height as f32)))
-                };
+                let configured = (width != 0 && height != 0).then_some((width, height));
+                // set_bounds already resized the drawable. Keep it at the newest request
+                // too, not just the geometry echo: a stale buffer would stretch for a frame.
+                let size = super::layer_size::configure_buffer(self.ctl.requested_size.get(), configured)
+                    .map(|(w, h)| size(px(w as f32), px(h as f32)));
 
                 let mut state = self.state.borrow_mut();
                 state.in_progress_configure = Some(InProgressConfigure {
@@ -1800,6 +1806,12 @@ impl PlatformWindow for WaylandWindow {
         .map(|v| f32::from(v) as i32)
         .map_size(|v| if v <= 0 { 1 } else { v });
 
+        // A layer once managed by set_bounds may later use Window::resize. That new
+        // explicit request must replace the remembered one, not be undone by its echo.
+        self.0.ctl.requested_size.set(super::layer_size::resize_request(
+            self.0.ctl.requested_size.get(),
+            (window_geometry.size.width, window_geometry.size.height),
+        ));
         state.surface_state.set_geometry(
             window_geometry.origin.x,
             window_geometry.origin.y,
@@ -2641,6 +2653,9 @@ pub mod layer_ctl {
 
     #[derive(Default)]
     pub(super) struct Ctl {
+        /// Last explicit layer bounds request. A configure already in flight must not
+        /// replace a newer size when configure handling echoes the window geometry.
+        pub(super) requested_size: Cell<Option<(u32, u32)>>,
         /// Inside `frame()`: GPUI is painting, its present commits what is set now.
         pub(super) in_frame: Cell<bool>,
         /// Set outside a frame, not committed yet.
@@ -2672,6 +2687,13 @@ pub mod layer_ctl {
         let w = LAYERS.with(|l| l.borrow().get(&surface).cloned())?;
         let ls = w.layer_surface()?;
         Some(f(&w, &ls))
+    }
+
+    /// WaylandDisplay::uuid is UUIDv5(wl_output.name). Resolve by that identity,
+    /// never its integer-scale bounds (wrong for fractional compositor coordinates).
+    pub fn display_id_for_name(name: &str, displays: &[Rc<dyn gpui::PlatformDisplay>]) -> Option<gpui::DisplayId> {
+        let wanted = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_DNS, name.as_bytes());
+        displays.iter().find(|d| d.uuid().ok() == Some(wanted)).map(|d| d.id())
     }
 
     fn commit_now(w: &WaylandWindowStatePtr) {
@@ -2723,6 +2745,31 @@ pub mod layer_ctl {
         with(surface, |w, ls| {
             ls.set_margin(m[0], m[1], m[2], m[3]);
             commit(w, c);
+        })
+        .is_some()
+    }
+
+    /// Resize the drawable without waiting for configure, then present size, margins and
+    /// the new buffer together. No idle/bare commit: Hyprland would stretch the old buffer.
+    /// Positive logical sizes: zero would ask the compositor to choose a dimension.
+    pub fn set_bounds(surface: usize, m: [i32; 4], size: (u32, u32)) -> bool {
+        with(surface, |w, ls| {
+            w.ctl.requested_size.set(Some((size.0.max(1), size.1.max(1))));
+            let this = w.clone();
+            let ls = ls.clone();
+            let executor = w.state.borrow().globals.executor.clone();
+            // Like PlatformWindow::resize, defer the callback out of the App/frame borrow.
+            // Defer protocol state too, so no intervening present can commit it early.
+            executor
+                .spawn(async move {
+                    // A newer set_bounds or Window::resize may have superseded this request.
+                    let (width, height) = this.ctl.requested_size.get().unwrap();
+                    this.resize(gpui::size(px(width as f32), px(height as f32)));
+                    ls.set_size(width, height);
+                    ls.set_margin(m[0], m[1], m[2], m[3]);
+                    this.request_redraw();
+                })
+                .detach();
         })
         .is_some()
     }

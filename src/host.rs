@@ -3,6 +3,8 @@
 //! output, empty otherwise. The core picks the host (`Os::move_to`); the view flips them
 //! (`Avatar::hosts_sync`). Dormant hosts take no input and draw nothing after their last frame.
 
+mod startup;
+
 use crate::platform::{Monitor, Os, Role, WinId};
 use crate::view::Avatar;
 use gpui_kit::*;
@@ -19,10 +21,43 @@ impl Render for HostView {
     }
 }
 
-/// GPUI's display holding the centre of `bounds` (GPUI px): where a window with them opens.
-pub fn display_for(cx: &App, bounds: Bounds<Pixels>) -> Option<DisplayId> {
-    let c = bounds.center();
-    cx.displays().into_iter().find(|d| d.bounds().contains(&c)).map(|d| d.id())
+/// Production host options: Hyprland resolves the wl_output by name, not GPUI bounds.
+/// Reused by startup, dormant/effect hosts and the compositor contract.
+pub fn options(cx: &App, os: &Os, role: Role, bounds: Bounds<Pixels>) -> anyhow::Result<WindowOptions> {
+    os.panel_options(role, bounds, false, cx)
+}
+
+/// wl_output.done/name can lag hyprctl at startup. Yield to GPUI's event loop until the
+/// named output is complete; never block dispatch or silently bind to a different output.
+/// Keep the startup closure (pack/listener included) until it can run exactly once.
+/// A removed/unadvertised output must fail startup, not leave an unserved control socket.
+pub fn when_ready(cx: &mut App, os: Rc<Os>, bounds: Bounds<Pixels>, start: impl FnOnce(WindowOptions, &mut App) + 'static) {
+    let began = std::time::Instant::now();
+    match options(cx, &os, Role::Body, bounds) {
+        Ok(options) => start(options, cx),
+        Err(mut error) => {
+            elog!("synaps-avatar: waiting for the body output's wl_output name: {error:#}");
+            cx.spawn(async move |cx| {
+                loop {
+                    let elapsed = began.elapsed();
+                    let Some(delay) = startup::retry_after(elapsed) else {
+                        // fatal logs the last lookup (wanted name + GPUI's displays), removes
+                        // the bound socket and exits; the event watcher has not started yet.
+                        crate::fatal(crate::startfail::Why::Other, error.context(format!("body output unavailable after {} ms", elapsed.as_millis())));
+                    };
+                    cx.background_executor().timer(delay).await;
+                    match cx.update(|cx| options(cx, &os, Role::Body, bounds)) {
+                        Ok(options) => {
+                            elog!("synaps-avatar: body output ready after {} ms", began.elapsed().as_millis());
+                            cx.update(|cx| start(options, cx));
+                            break;
+                        }
+                        Err(next) => error = next,
+                    }
+                }
+            }).detach();
+        }
+    }
 }
 
 /// A host's id, view and window (`Avatar::add_host`).
@@ -32,8 +67,7 @@ pub type Host = (WinId, WeakEntity<HostView>, AnyWindowHandle);
 /// when GPUI doesn't know that output yet (a new one: try again later).
 pub fn open_dormant(cx: &mut App, os: &Rc<Os>, avatar: &Entity<Avatar>, m: &Monitor, size: (i32, i32), sf: f32) -> Option<Host> {
     let bounds = Bounds::new(point(px(m.x as f32 / sf), px(m.y as f32 / sf)), gpui_kit::size(px(size.0 as f32 / sf), px(size.1 as f32 / sf)));
-    let mut options = os.window_options(Role::Body, bounds, false);
-    options.display_id = Some(display_for(cx, bounds)?);
+    let options = options(cx, os, Role::Body, bounds).ok()?;
     let mut id = 0;
     let mut view = None;
     let av = avatar.clone();
@@ -104,9 +138,7 @@ pub fn open_fx_hosts(cx: &mut App, os: &Rc<Os>, sf: f32) -> Vec<FxHost> {
     let mut out = Vec::new();
     for m in os.monitors() {
         let bounds = Bounds::new(point(px(m.x as f32 / sf), px(m.y as f32 / sf)), gpui_kit::size(px(1.0), px(1.0)));
-        let mut options = os.window_options(Role::Fx, bounds, false);
-        let Some(d) = display_for(cx, bounds) else { continue };
-        options.display_id = Some(d);
+        let Ok(options) = options(cx, os, Role::Fx, bounds) else { continue };
         let (mut id, mut view) = (0, None);
         let os2 = os.clone();
         if let Ok(w) = cx.open_window(options, |window, cx| {

@@ -880,3 +880,5 @@ covers the whole workspace, so the client's own tests run too. The installers' j
 `release.yml`) and the shots ([WINDOWS.md](WINDOWS.md#shots-on-a-runner)) run on top of that. The
 contract suites on a real display (`contract_x11`, `contract_hypr`, `contract_windows`) are `#[ignore]`d
 there: they need a test X display, the Wayland rig (`tools/wlrig`) or a Windows desktop.
+The Hyprland panel regression (`contract_hypr_panels`) uses the real Line/Settings without a
+pack or daemon; its assertions and rig prerequisites are in [HYPRLAND-PANEL-145.md](HYPRLAND-PANEL-145.md).

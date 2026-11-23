@@ -19,6 +19,17 @@
   open instead of reporting no compatible adapter (not yet run on XWayland with NVIDIA). Single-GPU Wayland is also pinned to the
   compositor's GPU, but its Vulkan driver list is left unchanged; vendor narrowing is only
   for multi-GPU machines. Native X11 keeps its boot-VGA workaround.
+- **Hyprland: the Line and Settings grow to fit their contents** instead of staying at their
+  initial 120 px height with the input field or Settings rows cut off (#145). They remain overlay
+  layer surfaces, never tiled; no Hyprland config changes are needed. The Line's width also
+  follows placement instead of freezing at its opening width. The first real Hyprland run
+  confirmed growth but exposed a second bug: panels opened on the focused monitor instead of
+  hers. All per-moment layers now name her body's output explicitly; open Line/Settings,
+  Reader and chip follow output changes by recreation. The Line is clamped to that output's
+  usable edges. Hosts and panels match outputs by name, including fractional scaling; panels
+  recreate after landing, keeping chat draft/selection and height. Unsent API-key/hidden-prompt
+  text must be re-entered after migration. **Output fix pending real-run confirmation.** Other
+  backends are unchanged.
 
 ## 1.2.0 (2026-11-23)
 
