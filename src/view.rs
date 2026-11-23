@@ -4211,6 +4211,14 @@ impl Avatar {
         if self.rag.is_some() {
             let places = matches!(cmd, Command::Pos(..) | Command::Perch { .. } | Command::Unperch | Command::Drop);
             if places && self.rag_held() {
+                // `drop` is a release: a press on her that held her and whose release never came
+                // (it went to someone else's surface) ends here, as a lost one does.
+                if matches!(cmd, Command::Drop) && self.press.is_some() {
+                    self.press_lost(now);
+                    cx.notify();
+                    self.schedule(cx);
+                    return "ok released".into();
+                }
                 return "error: held".into();
             }
             if places || matches!(cmd, Command::Hide | Command::Quit) {
@@ -5968,6 +5976,15 @@ impl Avatar {
             cx.notify();
             self.schedule(cx);
         }
+        // A left press while one is held: the button came up in between, and that release never
+        // reached her (it went to someone else's surface). The old press ends first, as a lost
+        // one does (a drag lets her go); this one then goes on as any press (catching her).
+        if ev.button == MouseButton::Left && self.press.is_some() {
+            elog!("synaps-avatar: a press while one was held (its release never came): the old one ends");
+            self.press_lost(Instant::now());
+            cx.notify();
+            self.schedule(cx);
+        }
         let Some(head) = self.hit(ev.position) else { return };
         // A press alone never stops her talking: grabbing, dragging, flinging and catching her
         // mid-flight leave her speech alone. Only a plain tap on her body stops her (mouse_up).
@@ -6078,8 +6095,23 @@ impl Avatar {
         self.schedule(cx);
     }
 
-    /// The press ended without a release (`Os::press_lost`): a drag lets her go as a release
-    /// would; a press that wasn't a drag does nothing (no click: nobody saw where it ended).
+    /// A left release that came to one of her body hosts she isn't showing in
+    /// (`crate::host::HostView`): the press went down on that host and she has crossed into
+    /// another output's since. It ends the press as `mouse_up` ends a drag: she's let go, with
+    /// the drag's velocity. A press that wasn't a drag just ends (she isn't where it went down).
+    pub fn release_elsewhere(&mut self, cx: &mut Context<Self>) {
+        if self.press.is_none() {
+            return;
+        }
+        elog!("synaps-avatar: released on a host she left (the press went down there)");
+        self.press_lost(Instant::now());
+        cx.notify();
+        self.schedule(cx);
+    }
+
+    /// The press ended without a release here (`Os::press_lost`, a release on a host she left,
+    /// a new press, `drop`): a drag lets her go as a release would; a press that wasn't a drag
+    /// does nothing (no click: nobody saw where it ended).
     fn press_lost(&mut self, now: Instant) {
         let Some(p) = self.press.take() else { return };
         self.os.set_held(false, self.rag_script_held());

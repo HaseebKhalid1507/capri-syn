@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """p2hosts.py BIN PACK: her body hosts across outputs in the rig (BRIEF-wayland §2.3, §5 P2): one capri-body layer per
 output; a teleport to HEADLESS-2 shows her there (and nothing of her is left on WAYLAND-1); back; HEADLESS-2 removed
-while she's on it: she comes down on WAYLAND-1 and its host is gone; added again: a dormant host for it.
+while she's on it: she comes down on WAYLAND-1 and its host is gone; added again: a dormant host for it. A drag from
+WAYLAND-1 let go over HEADLESS-2, with no window focused and with one: she's let go there, as on one output.
 Inside the sandbox only (run.sh python3 p2hosts.py ...). One line per check."""
 import json, os, subprocess, sys, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -114,6 +115,42 @@ with RigApp(BIN, PACK, LOG) as app:
     time.sleep(2.0)
     b = bodies()
     line("hotplug-added", sorted(x[0] for x in b) == ["HEADLESS-2", "WAYLAND-1"], f"{b}")
+    # A drag across outputs: pressed on her in her WAYLAND-1 host, let go over HEADLESS-2. She's let go as on one
+    # output, on both of Hyprland's ways with a held button (InputManager::mouseMoveUnified): with no surface
+    # holding the keyboard it hit-tests under the pointer (her HEADLESS-2 host must take the release); with a window
+    # focused it keeps the pointer on the surface pressed (her WAYLAND-1 host, no longer showing her, gets it).
+    w = app.world
+    for focused in (False, True):
+        ms = mons()
+        m1, m2 = ms["WAYLAND-1"], ms["HEADLESS-2"]
+        if focused:
+            hyprctl("eval", 'hl.window_rule({ name = "p2-focus", match = { class = "^p2-focus$" }, float = true, move = "100 100", size = "300 200" })')
+            w.toplevel("p2-focus", 300, 200)
+            time.sleep(0.6)
+        active = json.loads(hyprctl("-j", "activewindow") or "{}").get("class")
+        ctl(f"pos 900 {m1['height']}")
+        until(lambda: not state().get("teleporting") and state().get("rag") is None and state()["window"]["x"] < m2["x"], 6)
+        time.sleep(1.0)
+        st = state()
+        xid0, av = st["xid"], st["avatar"]
+        sx, sy = av["x"] + av["w"] // 2, av["y"] + av["h"] // 2
+        tx = m2["x"] + 600
+        w.warp(sx, sy); time.sleep(0.2); w.button(True)
+        for k in range(1, 61):
+            w.warp(round(sx + (tx - sx) * k / 60), sy); time.sleep(1 / 120)
+        time.sleep(0.3)
+        held = state()
+        w.button(False)
+        let_go = until(lambda: (state().get("rag") or {}).get("phase") != "held", 2)
+        until(lambda: state().get("rag") is None, 6)
+        st = state()
+        on2 = st["window"]["x"] + st["window"]["w"] // 2 >= m2["x"]
+        crossed = (held.get("rag") or {}).get("phase") == "held" and held["xid"] != xid0
+        line(f"drop-across-outputs-{'focused' if focused else 'unfocused'}", crossed and bool(let_go) and on2,
+             f"activewindow {active}; held: host {xid0:#x} -> {held['xid']:#x}, rag {json.dumps(held.get('rag'))[:80]}; "
+             f"after the release: rag {json.dumps(st.get('rag'))[:60]}, her window {st['window']}")
+    w.destroy("p2-focus")
+    time.sleep(0.3)
     log = open(LOG).read()
     line("no-errors", "panicked" not in log, "app log clean of panics")
 hyprctl("output", "remove", "HEADLESS-2")

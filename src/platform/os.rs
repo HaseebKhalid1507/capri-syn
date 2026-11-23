@@ -412,6 +412,12 @@ impl Os {
         self.host_changed.take()
     }
 
+    /// A body host on monitor `m`, as `adopt` registers one for a window GPUI opened.
+    #[cfg(test)]
+    pub(super) fn add_host(&self, id: WinId, m: Monitor) {
+        self.hosts.borrow_mut().push((id, m));
+    }
+
     /// The host whose monitor holds the centre of her window at (x, y) (the nearest if none).
     fn host_for(&self, x: i32, y: i32) -> Option<WinId> {
         let h = self.hosts.borrow();
@@ -458,6 +464,12 @@ impl Os {
         {
             self.stage.set_body(h);
             self.host_changed.set(Some(h));
+            // The host she moves into has no input region of its own (a dormant host takes
+            // none): the one out goes with her, in the same commit as the move. The view sends a
+            // region only when it changes, and while a press on her lasts it doesn't (all of her
+            // window): without this the host under the pointer took nothing until the press
+            // ended, and a release over it went to whatever was below her.
+            self.stage.set_shapes(Some(self.settle.borrow().out()), None).ok();
         }
         self.stage.move_to(x, y)
     }
