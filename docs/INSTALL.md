@@ -221,7 +221,10 @@ she runs through XWayland, the X server those desktops keep for X apps.
   output instead of hers, hiding the field below its bottom edge. Per-moment layers now name
   her body's output; open panels are recreated when she changes outputs, and the Line fits
   its output's usable edges. No `windowrule` or config edit is needed; chat and Settings use
-  the same overlay layer, not a tiled window.
+  the same overlay layer, not a tiled window. Hosts/panels match output names at fractional
+  scale; open panels migrate after landing, retaining chat draft/selection and height.
+  Unsent API-key/hidden-prompt text must be re-entered after migration; see
+  [the investigation and pending rig contract](HYPRLAND-PANEL-145.md).
 - **On Windows, Synaps 0.12's own `synaps login`** opens a sign-in tab cut at the URL's first `&`:
   copy the whole URL it prints into your browser, or sign in from her (Settings ▸ Brain) or through
   her installers' step, which open it whole (install.ps1 puts it there too; the default folder

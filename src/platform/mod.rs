@@ -602,6 +602,8 @@ pub trait Stage {
     fn pin_output(&self, _o: &mut WindowOptions, _cx: &gpui_kit::App) -> Result<()> { Ok(()) }
     /// Usable area of the active output-bound body host (not the focused output).
     fn body_area(&self) -> Option<WinRect> { None }
+    /// Named output of a per-output host; never inferred from GPUI integer-scale bounds.
+    fn surface_monitor(&self, _s: WinId) -> Option<Monitor> { None }
     /// Layer-shell cannot retarget an existing surface to another output.
     fn needs_reopen(&self, _s: WinId) -> bool { false }
     /// After `open_window`: the backend's id for it (the body's is remembered).

@@ -49,11 +49,10 @@ interactivity once, at creation, and commits every input-region change on its ow
   Xdg toplevels/popups, other layers and other compositors retain their existing behavior.
   `layer_size.rs` holds the pure buffer/echo/resize policies and their unit tests.
 
-- **Panel output (#145 follow-up)** `output_id(surface)` returns the protocol id of the
-  `wl_output` passed at creation, before any surface-enter event. Hyprland per-moment layers
-  copy their active body host's id into `WindowOptions::display_id`; the existing client path
-  resolves it to the object passed to `get_layer_surface`. Without it Hyprland chose the
-  focused monitor but interpreted margins computed for her monitor, cutting off the field.
-  This accessor records only; it changes no default output-selection behavior elsewhere.
+- **Named output (#145 review)** `display_id_for_name` resolves `wl_output.name` through
+  the existing WaylandDisplay UUIDv5(name) identity, returning its protocol DisplayId.
+  Both hosts and panels use it. GPUI's integer-scale bounds do not match Hyprland logical
+  bounds at fractional scale, so containment is not a reliable output selector. This
+  helper does not alter GPUI display geometry or output selection for any other caller.
 
 Drop these if upstream GPUI grows runtime layer-surface setters.

@@ -81,7 +81,7 @@ fn open_panel(cx: &mut App, os: Rc<Os>, first: Page, draft: String, sent: Vec<St
     let handle = cx
         .open_window(options, move |window, cx| {
             let id = os.adopt(Role::Line, window).expect("adopt Line");
-            let sf = window.scale_factor();
+            let sf = 1.0; // Production layout.sf, NOT the fractional drawable scale.
             adopted_open.set(Some((id, sf)));
             let on_ask = Box::new(move |ask, _: &mut App| {
                 if let Ask::Height(h) = ask {
@@ -144,11 +144,12 @@ fn open_panel(cx: &mut App, os: Rc<Os>, first: Page, draft: String, sent: Vec<St
 }
 
 // Same truncation/clamp helper and beside::place as lineview's Ask::Height -> line_follow.
-// Her position and wanted width are fixtures; no avatar pack or full View is needed.
+// Her registered host position and wanted width are fixtures; no avatar pack is needed.
 fn follow(os: &Os, id: WinId, sf: f32, measured: f32, width: f32) -> Result<(), String> {
     let d = |v: f32| (v * sf) as i32;
     let area = os.panel_area().expect("body output's usable area");
-    let her = WinRect::new(area.x + d(760.0), area.bottom() - d(686.0), d(500.0), d(708.0));
+    let (x, y) = os.shown_at();
+    let her = WinRect::new(x, y, d(500.0), d(708.0));
     let h = line_height::device_height(measured, sf, area.h);
     let panel = Panel {
         w: d(width),
@@ -174,11 +175,14 @@ fn contract_hypr_panels() {
         // Reopen from scratch after closing the first panel; don't quit with its last window.
         cx.set_quit_mode(gpui_kit::QuitMode::Explicit);
         crate::line::kit_init(cx);
-        let bodies: Vec<_> = [0.0, 2560.0]
+        let bodies: Vec<_> = [0.0, 2560.0, 5120.0]
             .into_iter()
             .map(|x| {
-                let bounds = Bounds::new(point(px(x + 760.0), px(914.0)), size(px(500.0), px(708.0)));
-                let options = os.panel_options(Role::Body, bounds, false, cx).expect("body output");
+                // On the 1.5x output the centre is beyond GPUI's integer-scale
+                // 1536x960 bounds but within Hyprland's 2048x1280 logical output.
+                let (dx, y) = if x == 5120.0 { (1500.0, 750.0) } else { (760.0, 914.0) };
+                let bounds = Bounds::new(point(px(x + dx), px(y)), size(px(500.0), px(708.0)));
+                let options = crate::host::options(cx, &os, Role::Body, bounds).expect("production body output by name");
                 let os = os.clone();
                 cx.open_window(options, move |window, cx| {
                     os.adopt(Role::Body, window).expect("adopt body host");
@@ -307,14 +311,14 @@ fn contract_hypr_panels() {
                 cx.update(|_| os.move_now(3320, 914)).expect("body on second output");
                 assert!(os.panel_needs_reopen(id), "an open layer cannot follow via margins");
                 focus_output("WAYLAND-1");
-                let (draft, sent, page) = handle
+                let saved = handle
                     .update(cx, |_, window, cx| view.update(cx, |l, cx| l.detach_for_output(window, cx)))
                     .expect("detach old Line");
-                assert_eq!(draft, "a draft in the input field");
-                assert_eq!(sent, ["previous message"]);
-                assert_eq!(page, Page::Settings);
+                assert_eq!(saved.draft, "a draft in the input field");
+                assert_eq!(saved.sent, ["previous message"]);
+                assert_eq!(saved.page, Page::Settings);
                 cx.background_executor().timer(Duration::from_millis(150)).await;
-                let moved = cx.update(|cx| open_panel(cx, os.clone(), page, draft, sent));
+                let moved = cx.update(|cx| open_panel(cx, os.clone(), saved.page, saved.draft.clone(), saved.sent.clone()));
                 assert!(!os.panel_needs_reopen(moved.adopted.get().unwrap().0));
                 let mut followed = false;
                 for _ in 0..100 {
@@ -355,6 +359,40 @@ fn contract_hypr_panels() {
                     cx.background_executor().timer(Duration::from_millis(100)).await;
                 }
             }
+            cx.update(|_| os.move_now(6620, 750)).expect("body on fractional output");
+            focus_output("WAYLAND-1");
+            let fractional = cx.update(|cx| open_panel(cx, os.clone(), Page::Settings, "fractional draft".into(), Vec::new()));
+            let mut settled = false;
+            for _ in 0..100 {
+                cx.background_executor().timer(Duration::from_millis(50)).await;
+                let (viewport, scale) = fractional.handle.update(cx, |_, w, _| (w.viewport_size(), w.scale_factor())).unwrap();
+                let height = fractional.measured.get();
+                if layer_on("capri-line").is_some_and(|(name, r)| name == "HEADLESS-3"
+                    && inside(r, os.panel_area().unwrap()) && r.h >= 436 && r.w == 780
+                    && (f32::from(viewport.width) - 780.0).abs() <= 1.0
+                    && (r.h as f32 - height).abs() <= 2.0
+                    && (f32::from(viewport.height) - r.h as f32).abs() <= 1.0
+                    && (scale - 1.5).abs() < 0.01) {
+                    settled = true;
+                    break;
+                }
+            }
+            assert!(settled, "1.5x output uses logical size/margins, not integer-scale display bounds: {:?}", layer_on("capri-line"));
+            assert_output("capri-line", "HEADLESS-3", os.panel_area().unwrap());
+            // An in-progress composition and reversed selection survive output recreation.
+            fractional.handle.update(cx, |_, w, cx| fractional.view.update(cx, |l, cx| l.output_preedit_fixture(w, cx))).unwrap();
+            let saved = fractional.handle.update(cx, |_, w, cx| fractional.view.update(cx, |l, cx| l.detach_for_output(w, cx))).unwrap();
+            assert_eq!(saved.draft, "入力 draft");
+            assert_eq!(saved.selection, 0..6);
+            assert!(saved.reversed);
+            let reopened = cx.update(|cx| open_panel(cx, os.clone(), saved.page, saved.draft.clone(), saved.sent.clone()));
+            cx.update(|cx| reopened.view.update(cx, |l, cx| l.restore_output_selection(&saved, cx)));
+            // The view also survives window loss (monitor unplug); migration can read it.
+            reopened.handle.update(cx, |_, w, _| w.remove_window()).unwrap();
+            let after_loss = cx.update(|cx| reopened.view.update(cx, |l, cx| l.output_draft(cx)));
+            assert_eq!(after_loss.draft, saved.draft);
+            assert_eq!(after_loss.selection, saved.selection);
+            assert_eq!(after_loss.reversed, saved.reversed);
             for body in bodies {
                 body.update(cx, |_, window, _| window.remove_window()).unwrap();
             }

@@ -292,23 +292,26 @@ pub(super) fn require_rig() {
     assert_eq!(std::fs::read_dir(run.join("hypr")).map(|d| d.count()).unwrap_or(0), 1, "exactly the rig's Hyprland");
 }
 
-/// Two outputs with different heights, focus deliberately opposite her body. Called
-/// before GPUI connects so both wl_output globals exist when the harness opens windows.
+/// Three outputs, including 150% scale; focus deliberately opposite her body. Called
+/// before GPUI connects so all wl_output globals exist when the harness opens windows.
 pub(super) fn panel_outputs() {
     require_rig();
     let mons: serde_json::Value = serde_json::from_str(&hyprctl(&["-j", "monitors"])).expect("monitors");
-    if !mons.as_array().expect("monitor list").iter().any(|m| m["name"] == "HEADLESS-2") {
-        hyprctl(&["output", "create", "headless", "HEADLESS-2"]);
+    for name in ["HEADLESS-2", "HEADLESS-3"] {
+        if !mons.as_array().expect("monitor list").iter().any(|m| m["name"] == name) {
+            hyprctl(&["output", "create", "headless", name]);
+        }
     }
     let until = Instant::now() + Duration::from_secs(5);
     loop {
         let mons: serde_json::Value = serde_json::from_str(&hyprctl(&["-j", "monitors"])).expect("monitors");
         let ms = mons.as_array().expect("monitor list");
         if ms.iter().any(|m| m["name"] == "WAYLAND-1" && m["x"] == 0 && m["height"] == 1600)
-            && ms.iter().any(|m| m["name"] == "HEADLESS-2" && m["x"] == 2560 && m["height"] == 1440) {
+            && ms.iter().any(|m| m["name"] == "HEADLESS-2" && m["x"] == 2560 && m["height"] == 1440)
+            && ms.iter().any(|m| m["name"] == "HEADLESS-3" && m["x"] == 5120 && m["height"] == 1920 && m["scale"] == 1.5) {
             return;
         }
-        assert!(Instant::now() < until, "need the rig's 2560x1600 + 2560x1440 outputs: {mons}");
+        assert!(Instant::now() < until, "need the rig's 100% + 100% + 150% outputs: {mons}");
         std::thread::sleep(Duration::from_millis(50));
     }
 }

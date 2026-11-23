@@ -4,6 +4,7 @@
 -- No require("nvidia"), no hl.env, no start hooks, no idle daemon, no shell.
 hl.monitor({ output = "WAYLAND-1",  mode = "2560x1600", position = "0x0",    scale = 1 })
 hl.monitor({ output = "HEADLESS-2", mode = "2560x1440", position = "2560x0", scale = 1 })
+hl.monitor({ output = "HEADLESS-3", mode = "3072x1920", position = "5120x0", scale = 1.5 })
 hl.monitor({ output = "",           mode = "preferred", position = "auto",   scale = 1 })
 
 hl.config({

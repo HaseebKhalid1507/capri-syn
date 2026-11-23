@@ -56,7 +56,6 @@ struct HMon {
     active_workspace: WsRef,
     #[serde(rename = "specialWorkspace")]
     special_workspace: WsRef,
-    focused: bool,
     disabled: bool,
 }
 
@@ -191,6 +190,8 @@ pub struct HyprDesktop {
     ids: Mutex<Ids>,
     /// The last pointer read and when (`POINTER_EVERY`).
     pointer: Mutex<Option<(Instant, (i32, i32))>>,
+    /// Invalidated by socket2 layout events; placement never polls IPC per frame.
+    monitors: Arc<Mutex<Option<Vec<HMon>>>>,
 }
 
 fn ours(ns_or_class: &str) -> bool {
@@ -241,7 +242,11 @@ impl HyprDesktop {
     }
 
     fn mons(&self) -> Vec<HMon> {
-        self.ipc.json::<Vec<HMon>>("monitors").map(|m| m.into_iter().filter(|m| !m.disabled).collect()).unwrap_or_default()
+        let Ok(mut cached) = self.monitors.lock() else { return Vec::new() };
+        if cached.is_none() {
+            *cached = self.ipc.json::<Vec<HMon>>("monitors").ok().map(|m| m.into_iter().filter(|m| !m.disabled).collect());
+        }
+        cached.clone().unwrap_or_default()
     }
 
     fn id(&self, key: &str) -> WinId {
@@ -275,16 +280,15 @@ impl HyprDesktop {
         Some((s, c))
     }
 
-    /// The origin (root px) and scale of the output holding logical point (x, y) (the
-    /// focused one if none does): where a layer surface with those bounds is made (the core
-    /// names that output in the window's `display_id`).
-    fn output_at(&self, x: f32, y: f32) -> Output {
+    /// Output holding a core logical point; deterministic first output if outside all.
+    /// Its name binds both the stage and GPUI to the same wl_output.
+    fn output_at(&self, x: f32, y: f32) -> HMon {
         let ms = self.mons();
         let inside = |m: &&HMon| {
             let r = m.monitor(false);
             (r.x as f32..(r.x + r.w) as f32).contains(&x) && (r.y as f32..(r.y + r.h) as f32).contains(&y)
         };
-        ms.iter().find(inside).or(ms.iter().find(|m| m.focused)).or(ms.first()).map_or(((0, 0), 1.0), |m| ((m.x, m.y), if m.scale > 0.0 { m.scale } else { 1.0 }))
+        ms.iter().find(inside).or(ms.first()).cloned().unwrap_or_default()
     }
 
     /// Focus window `w` (an address id).
@@ -356,7 +360,7 @@ impl Desktop for HyprDesktop {
                 return Some(self.id(addr));
             }
             let (x, y) = (x.parse().unwrap_or(0.0), y.parse().unwrap_or(0.0));
-            return Some(self.id(&our_key(ns, ns == namespace(Role::Body), self.output_at(x, y).0)));
+            return Some(self.id(&our_key(ns, ns == namespace(Role::Body), &self.output_at(x, y).name)));
         }
         let v: serde_json::Value = self.ipc.json("activewindow").ok()?;
         self.value_id(&v)
@@ -406,7 +410,7 @@ impl Desktop for HyprDesktop {
     }
 
     fn pointer_reader(&self) -> Result<PointerRead> {
-        let d = HyprDesktop { ipc: self.ipc.clone(), ids: Mutex::default(), pointer: Mutex::new(None) };
+        let d = HyprDesktop { ipc: self.ipc.clone(), ids: Mutex::default(), pointer: Mutex::new(None), monitors: Arc::default() };
         Ok(Box::new(move || d.pointer().ok()))
     }
 
@@ -437,9 +441,11 @@ impl Desktop for HyprDesktop {
     /// says a window moved or resized).
     fn watch(&self, hint: Box<dyn Fn(Hint) + Send>) -> Result<()> {
         let ipc = self.ipc.clone();
+        let monitors = self.monitors.clone();
         std::thread::Builder::new().name("avatar-hypr-events".into()).spawn(move || {
             ipc.events(|name, data| {
                 if let Some(h) = event_hint(name, data) {
+                    if matches!(h, Hint::Layout) && let Ok(mut cache) = monitors.lock() { *cache = None; }
                     hint(h);
                 }
             })
@@ -490,30 +496,26 @@ fn event_hint(name: &str, data: &str) -> Option<Hint> {
     })
 }
 
-/// An output's origin (root px) and scale.
-type Output = ((i32, i32), f32);
-
-/// One of her surfaces: its `wl_surface` (the `layer_ctl` key), its namespace, the origin and
-/// scale of the output it is on.
+/// One of her surfaces: protocol key, namespace and immutable wl_output name.
+/// All backend coordinates are Hyprland logical pixels (the core's sf is 1).
 #[derive(Clone)]
 struct Surface {
     ptr: usize,
     ns: &'static str,
-    output: (i32, i32),
-    scale: f32,
+    output: String,
 }
 
 pub struct LayerStage {
     desk: Arc<HyprDesktop>,
     surfaces: RefCell<HashMap<WinId, Surface>>,
     /// Where `dress` put each role (the output it was made on).
-    dressed: RefCell<HashMap<&'static str, Output>>,
+    dressed: RefCell<HashMap<&'static str, String>>,
     body: std::cell::Cell<WinId>,
 }
 
 /// The id key of one of her surfaces: its namespace (body hosts: and their output).
-fn our_key(ns: &str, host: bool, output: (i32, i32)) -> String {
-    if host { format!("ours:{ns}@{},{}", output.0, output.1) } else { format!("ours:{ns}") }
+fn our_key(ns: &str, host: bool, output: &str) -> String {
+    if host { format!("ours:{ns}@{output}") } else { format!("ours:{ns}") }
 }
 
 fn namespace(role: Role) -> &'static str {
@@ -536,21 +538,19 @@ impl LayerStage {
         self.surface(self.body.get())
     }
 
-    fn area_on(&self, output: (i32, i32)) -> Option<WinRect> {
-        let m = self.desk.mons().into_iter().find(|m| (m.x, m.y) == output)?;
-        let r = m.monitor(false).rect();
-        let g = |i: usize| m.reserved.get(i).copied().unwrap_or(0);
-        Some(WinRect::new(r.x + g(0), r.y + g(1), (r.w - g(0) - g(2)).max(1), (r.h - g(1) - g(3)).max(1)))
+    fn monitor_named(&self, name: &str) -> Option<HMon> {
+        self.desk.mons().into_iter().find(|m| m.name == name)
     }
 
-    fn margins(s: &Surface, x: i32, y: i32) -> [i32; 4] {
-        let l = |v: i32, o: i32| ((v - o) as f32 / s.scale).round() as i32;
-        [l(y, s.output.1), 0, 0, l(x, s.output.0)]
+    fn margins(&self, s: &Surface, x: i32, y: i32) -> Result<[i32; 4]> {
+        let m = self.monitor_named(&s.output).context("surface output disappeared")?;
+        Ok(geometry::margins(x, y, m.x, m.y))
     }
 }
 
 impl Stage for LayerStage {
-    /// A layer surface on the output under its bounds' centre, anchored top-left and placed
+    /// Hosts use the bounds' centre; per-moment layers use the active body host's output.
+    /// Each layer is anchored top-left and placed
     /// by margins. Her body on Top (Hyprland hides it under a fullscreen window), the Line and
     /// the reader on Overlay (never hidden while they may hold the keyboard), the chip on Top.
     fn dress(&self, role: Role, o: &mut WindowOptions) {
@@ -560,23 +560,24 @@ impl Stage for LayerStage {
         // Per-moment surfaces belong to her current body host, not the panel's centre
         // (which can lie off-screen during bootstrap) or the compositor's focus.
         let host = (!matches!(role, Role::Body | Role::Fx)).then(|| self.body_surface()).flatten();
-        let (output, scale) = host.map(|s| (s.output, s.scale))
+        let output = host.and_then(|s| self.monitor_named(&s.output))
             .unwrap_or_else(|| self.desk.output_at(f32::from(b.center().x), f32::from(b.center().y)));
-        if role == Role::Line && let Some(a) = self.area_on(output) {
-            let d = |v: Pixels| (f32::from(v) * scale).round() as i32;
+        if role == Role::Line {
+            let a = output.work_area(false);
+            let d = |v: Pixels| f32::from(v).round() as i32;
             let [x, y, w, h] = geometry::fit_bounds([d(b.origin.x), d(b.origin.y), d(b.size.width), d(b.size.height)], [a.x, a.y, a.w, a.h]);
-            b = Bounds::new(point(px(x as f32 / scale), px(y as f32 / scale)), size(px(w as f32 / scale), px(h as f32 / scale)));
+            b = Bounds::new(point(px(x as f32), px(y as f32)), size(px(w as f32), px(h as f32)));
             o.window_bounds = Some(gpui_kit::WindowBounds::Windowed(b));
         }
         let at = b.origin;
-        self.dressed.borrow_mut().insert(ns, (output, scale));
-        let m = |v: Pixels, o: i32| px(f32::from(v) - o as f32 / scale);
+        self.dressed.borrow_mut().insert(ns, output.name.clone());
+        let m = |v: Pixels, o: i32| px(f32::from(v) - o as f32);
         o.kind = WindowKind::LayerShell(LayerShellOptions {
             namespace: ns.to_string(),
             layer: if matches!(role, Role::Line | Role::Reader) { Layer::Overlay } else { Layer::Top },
             anchor: Anchor::TOP | Anchor::LEFT,
             exclusive_zone: Some(px(-1.0)),
-            margin: Some((m(at.y, output.1), px(0.0), px(0.0), m(at.x, output.0))),
+            margin: Some((m(at.y, output.y), px(0.0), px(0.0), m(at.x, output.x))),
             keyboard_interactivity: KeyboardInteractivity::None,
             ..Default::default()
         });
@@ -584,33 +585,23 @@ impl Stage for LayerStage {
 
     fn pin_output(&self, o: &mut WindowOptions, cx: &gpui_kit::App) -> Result<()> {
         let WindowKind::LayerShell(layer) = &o.kind else { bail!("not a Hyprland layer") };
-        // Reuse the body's actual protocol object; no guessing from window centres,
-        // monitor indices, focus or mixed-scale coordinates.
-        if !matches!(layer.namespace.as_str(), "capri-body" | "capri-fx") {
-            let body = self.body_surface().context("no body host for the panel output")?;
-            let id = layer_ctl::output_id(body.ptr).context("body host has no explicit wl_output")?;
-            let display = gpui_kit::DisplayId::new(id);
-            anyhow::ensure!(cx.displays().iter().any(|d| d.id() == display), "body output disappeared; refusing focused-output fallback");
-            o.display_id = Some(display);
-            return Ok(());
-        }
-        let (origin, scale) = self.dressed.borrow().get(layer.namespace.as_str()).copied().context("layer has no output")?;
-        // This is GPUI's wl_output protocol id, NOT Hyprland's monitor id. client.rs
-        // resolves it to the wl_output passed to get_layer_surface. Never pass None.
-        let at = point(px(origin.0 as f32 / scale), px(origin.1 as f32 / scale));
-        o.display_id = Some(cx.displays().into_iter().find(|d| {
-            let p = d.bounds().origin;
-            (f32::from(p.x - at.x)).abs() < 1.0 && (f32::from(p.y - at.y)).abs() < 1.0
-        }).context("body output not yet advertised by GPUI; refusing focused-output fallback")?.id());
+        // GPUI's integer-scale display bounds are NOT Hyprland's fractional-scale
+        // logical bounds. Match wl_output v4 names, for hosts and panels alike.
+        let name = self.dressed.borrow().get(layer.namespace.as_str()).cloned().context("layer has no output")?;
+        o.display_id = Some(layer_ctl::display_id_for_name(&name, &cx.displays()).context("wl_output name not yet advertised")?);
         Ok(())
     }
 
     fn body_area(&self) -> Option<WinRect> {
-        self.area_on(self.body_surface()?.output)
+        Some(self.monitor_named(&self.body_surface()?.output)?.work_area(false).rect())
+    }
+
+    fn surface_monitor(&self, id: WinId) -> Option<Monitor> {
+        Some(self.monitor_named(&self.surface(id)?.output)?.monitor(false))
     }
 
     fn needs_reopen(&self, id: WinId) -> bool {
-        self.surface(id).is_some_and(|s| geometry::needs_reopen(s.output, self.body_surface().map(|b| b.output)))
+        self.surface(id).is_some_and(|s| geometry::needs_reopen(&s.output, self.body_surface().as_ref().map(|b| b.output.as_str())))
     }
 
     fn adopt(&self, role: Role, window: &Window) -> Result<WinId> {
@@ -619,10 +610,10 @@ impl Stage for LayerStage {
             other => bail!("not a Wayland window ({other:?}): GPUI and the Hyprland backend disagree"),
         };
         let ns = namespace(role);
-        let (output, scale) = self.dressed.borrow().get(ns).copied().unwrap_or(((0, 0), 1.0));
+        let output = self.dressed.borrow().get(ns).cloned().context("layer has no output name")?;
         // One id per surface (body hosts share a namespace).
-        let id = self.desk.id(&our_key(ns, matches!(role, Role::Body | Role::Fx), output));
-        self.surfaces.borrow_mut().insert(id, Surface { ptr, ns, output, scale });
+        let id = self.desk.id(&our_key(ns, matches!(role, Role::Body | Role::Fx), &output));
+        self.surfaces.borrow_mut().insert(id, Surface { ptr, ns, output });
         if role == Role::Fx {
             // Effects only: every click goes through.
             layer_ctl::set_input_region(ptr, Some(&[]));
@@ -654,7 +645,7 @@ impl Stage for LayerStage {
     /// her place change in one commit.
     fn move_to(&self, x: i32, y: i32) -> Result<()> {
         if let Some(s) = self.body_surface() {
-            layer_ctl::set_margin(s.ptr, Self::margins(&s, x, y), Commit::WithFrame);
+            layer_ctl::set_margin(s.ptr, self.margins(&s, x, y)?, Commit::WithFrame);
         }
         Ok(())
     }
@@ -668,29 +659,28 @@ impl Stage for LayerStage {
     /// Margins alone leave its buffer at LINE_H0 forever (#145). Only the Line gets live
     /// width/height here; Reader follows and effect-host placement stay margin-only.
     fn place(&self, s: WinId, x: i32, y: i32, w: i32, h: i32) -> Result<()> {
-        if let Some(s) = self.surface(s) {
-            let [x, y, w, h] = if s.ns == namespace(Role::Line) {
-                let a = self.area_on(s.output).context("Line output disappeared; recreate it on her body host")?;
-                geometry::fit_bounds([x, y, w, h], [a.x, a.y, a.w, a.h])
-            } else { [x, y, w, h] };
-            let margins = Self::margins(&s, x, y);
-            if let Some(size) = geometry::placed_size(s.ns, w, h, s.scale) {
-                layer_ctl::set_bounds(s.ptr, margins, size);
-            } else {
-                layer_ctl::set_margin(s.ptr, margins, Commit::WithFrame);
-            }
+        let s = self.surface(s).context("surface closed before place")?;
+        let [x, y, w, h] = if s.ns == namespace(Role::Line) {
+            let a = self.monitor_named(&s.output).context("Line output disappeared; recreate it on her body host")?.work_area(false);
+            geometry::fit_bounds([x, y, w, h], [a.x, a.y, a.w, a.h])
+        } else { [x, y, w, h] };
+        let margins = self.margins(&s, x, y)?;
+        if let Some(size) = geometry::placed_size(s.ns, w, h) {
+            anyhow::ensure!(layer_ctl::set_bounds(s.ptr, margins, size), "layer closed before place");
+        } else {
+            anyhow::ensure!(layer_ctl::set_margin(s.ptr, margins, Commit::WithFrame), "layer closed before place");
         }
         Ok(())
     }
 
-    /// The input region (device px → the surface's logical px); the visible region is all of
+    /// The input region (core logical px → surface logical px); the visible region is all of
     /// her window, always (a compositor blends her alpha).
     fn set_shapes(&self, input: Option<&[ShapeRect]>, _visible: Option<Visible<'_>>) -> Result<()> {
         let (Some(s), Some(input)) = (self.body_surface(), input) else { return Ok(()) };
-        let k = 1.0 / s.scale;
+        // Shape rectangles, like margins, are already logical (core sf=1).
         let rects: Vec<Bounds<Pixels>> = input
             .iter()
-            .map(|r| Bounds::new(point(px(r.0 as f32 * k), px(r.1 as f32 * k)), size(px(r.2 as f32 * k), px(r.3 as f32 * k))))
+            .map(|r| Bounds::new(point(px(r.0 as f32), px(r.1 as f32)), size(px(r.2 as f32), px(r.3 as f32))))
             .collect();
         layer_ctl::set_input_region(s.ptr, Some(&rects));
         Ok(())
@@ -699,10 +689,10 @@ impl Stage for LayerStage {
     /// The input region of surface `s` (a compositor blends the rest).
     fn shape_of(&self, s: WinId, input: &[ShapeRect], _visible: Visible<'_>) -> Result<()> {
         let s = self.surface(s).context("not one of her surfaces")?;
-        let k = 1.0 / s.scale;
+        // Shape rectangles, like margins, are already logical (core sf=1).
         let rects: Vec<Bounds<Pixels>> = input
             .iter()
-            .map(|r| Bounds::new(point(px(r.0 as f32 * k), px(r.1 as f32 * k)), size(px(r.2 as f32 * k), px(r.3 as f32 * k))))
+            .map(|r| Bounds::new(point(px(r.0 as f32), px(r.1 as f32)), size(px(r.2 as f32), px(r.3 as f32))))
             .collect();
         layer_ctl::set_input_region(s.ptr, Some(&rects));
         Ok(())
@@ -743,7 +733,7 @@ impl Stage for LayerStage {
 /// The running Hyprland (its request socket answers), and a stage for her layer surfaces.
 pub fn connect() -> Result<(Arc<HyprDesktop>, LayerStage)> {
     let ipc = ipc::Ipc::from_env().context("hyprland")?;
-    let desk = Arc::new(HyprDesktop { ipc, ids: Mutex::default(), pointer: Mutex::new(None) });
+    let desk = Arc::new(HyprDesktop { ipc, ids: Mutex::default(), pointer: Mutex::new(None), monitors: Arc::default() });
     let stage = LayerStage { desk: desk.clone(), surfaces: RefCell::default(), dressed: RefCell::default(), body: std::cell::Cell::new(0) };
     Ok((desk, stage))
 }

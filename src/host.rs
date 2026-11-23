@@ -19,10 +19,10 @@ impl Render for HostView {
     }
 }
 
-/// GPUI's display holding the centre of `bounds` (GPUI px): where a window with them opens.
-pub fn display_for(cx: &App, bounds: Bounds<Pixels>) -> Option<DisplayId> {
-    let c = bounds.center();
-    cx.displays().into_iter().find(|d| d.bounds().contains(&c)).map(|d| d.id())
+/// Production host options: Hyprland resolves the wl_output by name, not GPUI bounds.
+/// Reused by startup, dormant/effect hosts and the compositor contract.
+pub fn options(cx: &App, os: &Os, role: Role, bounds: Bounds<Pixels>) -> anyhow::Result<WindowOptions> {
+    os.panel_options(role, bounds, false, cx)
 }
 
 /// A host's id, view and window (`Avatar::add_host`).
@@ -32,8 +32,7 @@ pub type Host = (WinId, WeakEntity<HostView>, AnyWindowHandle);
 /// when GPUI doesn't know that output yet (a new one: try again later).
 pub fn open_dormant(cx: &mut App, os: &Rc<Os>, avatar: &Entity<Avatar>, m: &Monitor, size: (i32, i32), sf: f32) -> Option<Host> {
     let bounds = Bounds::new(point(px(m.x as f32 / sf), px(m.y as f32 / sf)), gpui_kit::size(px(size.0 as f32 / sf), px(size.1 as f32 / sf)));
-    let mut options = os.window_options(Role::Body, bounds, false);
-    options.display_id = Some(display_for(cx, bounds)?);
+    let options = options(cx, os, Role::Body, bounds).ok()?;
     let mut id = 0;
     let mut view = None;
     let av = avatar.clone();
@@ -104,9 +103,7 @@ pub fn open_fx_hosts(cx: &mut App, os: &Rc<Os>, sf: f32) -> Vec<FxHost> {
     let mut out = Vec::new();
     for m in os.monitors() {
         let bounds = Bounds::new(point(px(m.x as f32 / sf), px(m.y as f32 / sf)), gpui_kit::size(px(1.0), px(1.0)));
-        let mut options = os.window_options(Role::Fx, bounds, false);
-        let Some(d) = display_for(cx, bounds) else { continue };
-        options.display_id = Some(d);
+        let Ok(options) = options(cx, os, Role::Fx, bounds) else { continue };
         let (mut id, mut view) = (0, None);
         let os2 = os.clone();
         if let Ok(w) = cx.open_window(options, |window, cx| {

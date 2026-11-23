@@ -320,7 +320,7 @@ impl Avatar {
         true
     }
 
-    /// Open the close-up's window over her target's monitor.
+    /// Open the close-up's window over her current body host's monitor.
     fn intro_open(&mut self, cx: &mut Context<Self>) {
         let Some(frames) = self.intro.frames.clone() else { return };
         let (to, place) = self.intro.target.unwrap_or((self.origin, self.placement));

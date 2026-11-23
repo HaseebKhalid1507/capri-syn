@@ -3622,19 +3622,8 @@ impl Avatar {
             self.line_follow(None, cx);
         }
         if let Some(active) = self.os.take_host_change() {
-            // set_margin cannot change a layer's wl_output. Do not wait for her
-            // landing (panels_follow is paused during a drag/teleport).
-            if self.line.as_ref().is_some_and(|l| self.os.panel_needs_reopen(l.xid)) {
-                self.line_reopen_on_output(cx);
-            }
-            if self.reader.as_ref().is_some_and(|(_, id, _)| self.os.panel_needs_reopen(*id)) {
-                self.reader_reopen_on_output(cx);
-            }
-            if self.chip_rect.is_some_and(|r| self.os.panel_needs_reopen(r.4)) {
-                if let Some(h) = self.chip.take() { h.update(cx, |_, window, _| window.remove_window()).ok(); }
-                self.chip_rect = None;
-                self.open_chip(cx);
-            }
+            // Only body hosts switch during drag. Panels keep their keyboard holder
+            // until panels_follow runs on landing (also important for drag release).
             for (id, v, _) in &self.hosts {
                 v.update(cx, |h, cx| {
                     h.active = *id == active;
@@ -4656,8 +4645,13 @@ impl Avatar {
 
     /// The open reader and Line follow her (a drag, a summon, a fall), once she has landed.
     fn panels_follow(&mut self, cx: &mut Context<Self>) {
-        if (self.line.is_none() && self.reader.is_none()) || self.teleport.is_some() || self.rag.is_some() || self.press.is_some() || self.brain_in_flight() {
+        if (self.line.is_none() && self.reader.is_none() && self.chip.is_none()) || self.teleport.is_some() || self.rag.is_some() || self.press.is_some() || self.brain_in_flight() {
             return;
+        }
+        if self.chip_rect.is_some_and(|r| self.os.panel_needs_reopen(r.4)) {
+            if let Some(h) = self.chip.take() { h.update(cx, |_, window, _| window.remove_window()).ok(); }
+            self.chip_rect = None;
+            self.open_chip(cx);
         }
         let her = self.her_body();
         if self.line.as_ref().is_some_and(|l| l.her != her || self.os.panel_needs_reopen(l.xid)) {
@@ -4675,9 +4669,7 @@ impl Avatar {
             let raw = self.bubble.as_ref().map(|b| if b.raw.trim().is_empty() { b.text.iter().collect::<String>() } else { b.raw.clone() }).unwrap_or_default();
             let p = self.reader_rect(&raw);
             let r = p.rect;
-            if self.reader_at.is_none_or(|(_, q)| q.rect != r) {
-                self.os.place(xid, r.x, r.y, r.w, r.h).ok();
-            }
+            if self.reader_at.is_none_or(|(_, q)| q.rect != r) && self.os.place(xid, r.x, r.y, r.w, r.h).is_err() { return; }
             self.reader_at = Some((her, p));
             let t = Some((p.side, p.tail as f32 / self.layout.sf));
             h.update(cx, |rd, _, cx| rd.set_tail(t, cx)).ok();
