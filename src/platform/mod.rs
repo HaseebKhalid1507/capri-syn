@@ -603,7 +603,8 @@ pub trait Stage {
     /// Her body's id (0 before `adopt`): the host she shows in.
     fn body(&self) -> WinId;
     /// She shows in body host `s` from now on (`Caps::host_per_output`): body moves, shapes
-    /// and the keyboard go to it; the one she left takes no input.
+    /// and the keyboard go to it; the one she left takes no input. The core sends her input
+    /// region to `s` right after (`Os::send_move`): it keeps none of its own meanwhile.
     fn set_body(&self, _s: WinId) {}
     /// Body origin, root px.
     fn move_to(&self, x: i32, y: i32) -> Result<()>;
@@ -638,6 +639,25 @@ pub trait Stage {
     }
     /// Her surface `s` lets the keyboard go, to `to` when given.
     fn release_keyboard(&self, s: WinId, to: Option<WinId>) -> Result<()>;
+    /// A press of his on her went down in body host `s` and lasts (`on`), or it ended (the same
+    /// `s`): from `Os::set_held`, once each; `on` again whenever the keyboard changes hands while
+    /// his button is down (`Os::press_recheck`). Where the desktop takes the pointer off the
+    /// surface pressed mid-press (with a release of its own on the way out: Hyprland with nothing
+    /// holding the keyboard), the stage may keep it on `s` meanwhile, never less until the end.
+    /// Default: nothing to do (an implicit grab keeps every pointer event hers already).
+    fn keep_pointer(&self, _s: WinId, _on: bool) {}
+    /// Her surface taking the keyboard ends a press under way: the desktop releases every
+    /// button first (Hyprland: `CLayerSurface::takeKeyboardFocus`). Then the core holds a grab
+    /// made while his button is down on her until his release (`Os::grab_keyboard`).
+    fn grab_ends_press(&self) -> bool {
+        false
+    }
+    /// A press of his on her starts (where `grab_ends_press`): her surfaces that asked for the
+    /// keyboard but don't show yet stop asking, as one showing would take it then, releasing his
+    /// button. The ones that stopped; the core asks for them again at his release.
+    fn disarm_keyboard(&self) -> Vec<WinId> {
+        Vec::new()
+    }
 }
 
 /// Connect to the desktop she runs on, the same one GPUI picks (`linux::backend`): Wayland on

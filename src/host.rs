@@ -1,7 +1,8 @@
 //! Her body's hosts where a surface shows on one output only (`Caps::host_per_output`): one
 //! window per output, each a `HostView` showing her (the `Avatar` entity) while she is on its
 //! output, empty otherwise. The core picks the host (`Os::move_to`); the view flips them
-//! (`Avatar::hosts_sync`). Dormant hosts take no input and draw nothing after their last frame.
+//! (`Avatar::hosts_sync`). Dormant hosts take no input and draw nothing after their last frame;
+//! a release that still comes to one ends her press (`Avatar::release_elsewhere`).
 
 use crate::platform::{Monitor, Os, Role, WinId};
 use crate::view::Avatar;
@@ -15,7 +16,32 @@ pub struct HostView {
 
 impl Render for HostView {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        div().size_full().children(self.active.then(|| self.avatar.clone()))
+        let root = div().size_full();
+        if self.active {
+            return root.child(self.avatar.clone());
+        }
+        // Not showing her, it may still get the release of a press on her, which went down in it
+        // before she crossed into another output's host: Hyprland keeps the pointer on the
+        // surface pressed to the release while some surface holds the keyboard
+        // (`InputManager::mouseMoveUnified`; with none, this one asks for it while the press
+        // lasts: `Stage::keep_pointer`), and should the pointer leave it anyway, it releases
+        // the button to it on the way out. Her own listeners are painted in the host she shows
+        // in only.
+        let avatar = self.avatar.clone();
+        root.child(
+            canvas(
+                |_, _, _| (),
+                move |_, _, window, _| {
+                    let avatar = avatar.clone();
+                    window.on_mouse_event(move |ev: &MouseUpEvent, phase, _, cx| {
+                        if phase == DispatchPhase::Bubble && ev.button == MouseButton::Left {
+                            avatar.update(cx, |v, cx| v.release_elsewhere(cx));
+                        }
+                    });
+                },
+            )
+            .size_full(),
+        )
     }
 }
 

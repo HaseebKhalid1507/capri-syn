@@ -1445,6 +1445,86 @@ struct Press {
     dragging: bool,
 }
 
+/// What may end her press other than its own release reaching `Avatar::mouse_up`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Ender {
+    /// A left release on a body host she isn't showing in (`Avatar::release_elsewhere`).
+    ReleaseElsewhere,
+    /// A left press on her (`Avatar::mouse_down`): the held one's release never reached her.
+    Press,
+    /// `drop` (`Avatar::apply`).
+    Drop,
+}
+
+/// What an `Ender` does to her press.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Ends {
+    /// No press of his held: it does what it does alone (a `drop` meets a scripted hold, if any,
+    /// and is refused: `drop_reply`).
+    Nothing,
+    /// The press ends as a lost one does (`Avatar::press_lost`: a drag lets her go with its
+    /// velocity), and the ender is spent on it.
+    Press,
+    /// The press ends so, then the ender goes on as it would alone.
+    PressThen,
+}
+
+/// The rules for a press whose release may never reach her. A release on a host she left is
+/// the press's own (it went down there). A new press ends a held drag and is spent on that: it
+/// neither catches her nor counts as a tap (no click reaction, no talk field), with a rigid rag
+/// too, whose let-go isn't a flight to catch. One that ends a tap (nothing of it shows) goes on
+/// as a press. `drop` ends any.
+fn press_ends(press: Option<&Press>, e: Ender) -> Ends {
+    match (press, e) {
+        (None, _) => Ends::Nothing,
+        (Some(p), Ender::Press) if !p.dragging => Ends::PressThen,
+        (Some(_), _) => Ends::Press,
+    }
+}
+
+/// `drop`'s answer while she is held: a press of his let go, or a scripted hold refused.
+fn drop_reply(e: Ends) -> &'static str {
+    if e == Ends::Nothing { "error: held" } else { "ok released" }
+}
+
+#[cfg(test)]
+mod press_end_tests {
+    use super::{Ender, Ends, Press, drop_reply, press_ends};
+
+    fn press(dragging: bool) -> Press {
+        Press { root: (0, 0), origin: (0, 0), head: false, dragging }
+    }
+
+    /// A release on a body host she isn't showing in ends the press there: a drag is let go
+    /// (not held on with the button up), a tap just ends. Before, no listener of hers was on
+    /// that host, and the press stayed held.
+    #[test]
+    fn a_release_on_a_host_she_left_ends_the_press() {
+        assert_eq!(press_ends(Some(&press(true)), Ender::ReleaseElsewhere), Ends::Press);
+        assert_eq!(press_ends(Some(&press(false)), Ender::ReleaseElsewhere), Ends::Press);
+        assert_eq!(press_ends(None, Ender::ReleaseElsewhere), Ends::Nothing, "no press: nothing to end");
+    }
+
+    /// A new press while one is held: the held one ends first. Ending a drag spends it (no catch,
+    /// no tap: the talk field doesn't open for the click that let her go); ending a tap, it goes
+    /// on. Before, a new press left the old one held.
+    #[test]
+    fn a_press_while_one_is_held_ends_the_held_one() {
+        assert_eq!(press_ends(Some(&press(true)), Ender::Press), Ends::Press, "a held drag: let go, the click spent on it");
+        assert_eq!(press_ends(Some(&press(false)), Ender::Press), Ends::PressThen, "a held tap: ended, the new press goes on");
+        assert_eq!(press_ends(None, Ender::Press), Ends::Nothing, "a press alone is a press");
+    }
+
+    /// `drop` while she's held: a press of his is let go (`ok released`), a scripted hold is
+    /// refused (`error: held`). Before, both were refused.
+    #[test]
+    fn drop_lets_go_of_his_press_not_of_a_script() {
+        assert_eq!(drop_reply(press_ends(Some(&press(true)), Ender::Drop)), "ok released");
+        assert_eq!(drop_reply(press_ends(Some(&press(false)), Ender::Drop)), "ok released");
+        assert_eq!(drop_reply(press_ends(None, Ender::Drop)), "error: held", "held by a script, no press of his");
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Placement {
     Ground,
@@ -4211,7 +4291,16 @@ impl Avatar {
         if self.rag.is_some() {
             let places = matches!(cmd, Command::Pos(..) | Command::Perch { .. } | Command::Unperch | Command::Drop);
             if places && self.rag_held() {
-                return "error: held".into();
+                // `drop` is a release: a press of his that held her and whose release never
+                // reached her ends here, as a lost one does (`press_ends`); a scripted hold is
+                // refused.
+                let e = if matches!(cmd, Command::Drop) { press_ends(self.press.as_ref(), Ender::Drop) } else { Ends::Nothing };
+                if e != Ends::Nothing {
+                    self.press_lost(now);
+                    cx.notify();
+                    self.schedule(cx);
+                }
+                return drop_reply(e).into();
             }
             if places || matches!(cmd, Command::Hide | Command::Quit) {
                 self.rag_cancel(now);
@@ -5909,7 +5998,13 @@ impl Avatar {
                     self.fall("layout", now);
                 }
             }
-            WatchEvent::Focus | WatchEvent::Desktop | WatchEvent::Pointer(_) | WatchEvent::Session(_) => self.brain_watch(ev, now),
+            WatchEvent::Focus => {
+                // The keyboard changed hands: a press on her may need its host to keep the
+                // pointer now (`Os::press_recheck`).
+                self.os.press_recheck();
+                self.brain_watch(ev, now);
+            }
+            WatchEvent::Desktop | WatchEvent::Pointer(_) | WatchEvent::Session(_) => self.brain_watch(ev, now),
         }
     }
 
@@ -5967,6 +6062,26 @@ impl Avatar {
         if self.menu.take().is_some() {
             cx.notify();
             self.schedule(cx);
+        }
+        // A left press while one is held: the button came up in between, and that release never
+        // reached her. On X11 another client's grab can take it (a binding, a screenshot tool,
+        // mid-drag; `Os::press_lost` notices only after `PRESS_LOST`); on Windows any button's
+        // release ends GPUI's capture, so a right click mid-drag leaves the left release to
+        // whatever is under the pointer (and that backend can't say the button is up: no
+        // `Desktop::primary_down`); on Hyprland the host it went down in may close mid-press
+        // (its output removed), its release with it. The held press ends first, as a lost one
+        // does; this one is then spent on it or goes on (`press_ends`).
+        if ev.button == MouseButton::Left {
+            let e = press_ends(self.press.as_ref(), Ender::Press);
+            if e != Ends::Nothing {
+                elog!("synaps-avatar: a press while one was held (its release never came): the old one ends");
+                self.press_lost(Instant::now());
+                cx.notify();
+                self.schedule(cx);
+            }
+            if e == Ends::Press {
+                return;
+            }
         }
         let Some(head) = self.hit(ev.position) else { return };
         // A press alone never stops her talking: grabbing, dragging, flinging and catching her
@@ -6049,9 +6164,11 @@ impl Avatar {
             return;
         }
         let Some(p) = self.press.take() else { return };
-        self.os.set_held(false, self.rag_script_held());
+        // The button is up: what the release does may take the keyboard (`Os::button_up`).
+        self.os.button_up();
         let now = Instant::now();
         if p.dragging {
+            self.os.set_held(false, self.rag_script_held());
             if self.rag.as_ref().is_some_and(|r| matches!(r.feed, ragview::Feed::Real)) {
                 self.rag_release(now);
             }
@@ -6073,13 +6190,33 @@ impl Avatar {
         } else if !p.head && self.session.is_some() {
             self.open_input(None, window, cx);
         }
+        // The press ends after the field took the keyboard: a host that asked for it on demand
+        // while the press lasted (`Stage::keep_pointer`) goes straight to holding it then, never
+        // letting it go in between (the field would close on that: `observe_window_activation`).
+        self.os.set_held(false, self.rag_script_held());
         self.brain_touch(if p.head { crate::brain::Touch::Headpat } else { crate::brain::Touch::Click });
         cx.notify();
         self.schedule(cx);
     }
 
-    /// The press ended without a release (`Os::press_lost`): a drag lets her go as a release
-    /// would; a press that wasn't a drag does nothing (no click: nobody saw where it ended).
+    /// A left release that came to one of her body hosts she isn't showing in
+    /// (`crate::host::HostView`): the press went down in that host and she has crossed into
+    /// another output's since (Hyprland sends the release where the press went down). It ends
+    /// the press as `mouse_up` ends a drag: she's let go, with the drag's velocity. A press that
+    /// wasn't a drag just ends (she isn't where it went down).
+    pub fn release_elsewhere(&mut self, cx: &mut Context<Self>) {
+        if press_ends(self.press.as_ref(), Ender::ReleaseElsewhere) == Ends::Nothing {
+            return;
+        }
+        elog!("synaps-avatar: released on a host she left (the press went down there)");
+        self.press_lost(Instant::now());
+        cx.notify();
+        self.schedule(cx);
+    }
+
+    /// The press ended without a release here (`Os::press_lost`, a release on a host she left,
+    /// a new press, `drop`): a drag lets her go as a release would; a press that wasn't a drag
+    /// does nothing (no click: nobody saw where it ended).
     fn press_lost(&mut self, now: Instant) {
         let Some(p) = self.press.take() else { return };
         self.os.set_held(false, self.rag_script_held());
