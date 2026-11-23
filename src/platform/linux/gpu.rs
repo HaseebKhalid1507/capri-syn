@@ -3,6 +3,11 @@
 use super::Backend;
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
+use wayland_client::protocol::{wl_callback, wl_registry};
+use wayland_client::{Connection, Dispatch, QueueHandle, delegate_noop};
+use wayland_protocols::wp::linux_dmabuf::zv1::client::{
+    zwp_linux_dmabuf_feedback_v1, zwp_linux_dmabuf_v1,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Gpu {
@@ -29,6 +34,10 @@ fn pci_id(path: &Path) -> Option<String> {
 }
 
 fn pci_gpu(device: &Path) -> Option<Gpu> {
+    // Other DRM buses (notably virtio) expose IDs too, but those aren't PCI GPU IDs.
+    if device.join("subsystem").canonicalize().ok()?.file_name()? != "pci" {
+        return None;
+    }
     Some(Gpu {
         id: pci_id(&device.join("device"))?,
         vendor: pci_id(&device.join("vendor"))?,
@@ -65,29 +74,35 @@ fn cards_in(drm: &Path) -> Vec<Card> {
             }
             let device = entry.path().join("device");
             Some(Card {
-                gpu: Gpu {
-                    id: read(device.join("device")),
-                    vendor: read(device.join("vendor")),
-                },
+                gpu: pci_gpu(&device).unwrap_or(Gpu {
+                    id: String::new(),
+                    vendor: String::new(),
+                }),
                 boot: read(device.join("boot_vga")) == "1",
             })
         })
         .collect()
 }
 
-/// Aquamarine's colon-separated priority list: only its first entry is the main device.
-/// Use aliases without colons (e.g. gpu-nvidia), as required by AQ_DRM_DEVICES itself.
-fn aq_first(value: &str) -> Option<&Path> {
-    let first = Path::new(value.split(':').next()?.trim());
-    first.is_absolute().then_some(first)
+/// Aquamarine trims its colon-separated list, drops empties and skips missing paths.
+/// Canonicalization also follows aliases such as /dev/dri/gpu-nvidia.
+fn aq_first(value: &str) -> Option<PathBuf> {
+    value
+        .split(':')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .find_map(|path| Path::new(path).canonicalize().ok())
 }
 
-fn aq_gpu() -> Option<Gpu> {
-    let value = std::env::var("AQ_DRM_DEVICES").ok()?;
-    // metadata follows symlinks such as /dev/dri/gpu-nvidia.
-    let meta = std::fs::metadata(aq_first(&value)?).ok()?;
+fn aq_gpu(sys: &Path, value: &str) -> Option<Gpu> {
+    let meta = std::fs::metadata(aq_first(value)?).ok()?;
     meta.file_type().is_char_device().then_some(())?;
-    gpu_from_dev(Path::new("/sys"), meta.rdev())
+    gpu_from_dev(sys, meta.rdev())
+}
+
+/// A single GPU needs no vendor restriction (e.g. NVK with an old NVIDIA manifest).
+pub(super) fn narrow_drivers(card_count: usize) -> bool {
+    card_count >= 2
 }
 
 /// Lazy probes: never ask Wayland on X11/XWayland, or AQ when feedback already resolved.
@@ -104,7 +119,7 @@ fn pick_in(
                 return Some((gpu, "Wayland linux-dmabuf main_device"));
             }
             if let Some(gpu) = aq() {
-                return Some((gpu, "AQ_DRM_DEVICES first entry"));
+                return Some((gpu, "AQ_DRM_DEVICES first existing entry"));
             }
         }
         Backend::XWayland | Backend::XWaylandAuto => {
@@ -129,7 +144,7 @@ pub(super) fn pick(backend: Backend, cards: &[Card]) -> Option<(Gpu, &'static st
         backend,
         cards,
         || gpu_from_dev(Path::new("/sys"), wayland_main_device()?),
-        aq_gpu,
+        || aq_gpu(Path::new("/sys"), &std::env::var("AQ_DRM_DEVICES").ok()?),
         xwayland_gpu,
     )
 }
@@ -140,6 +155,9 @@ fn xwayland_gpu() -> Option<Gpu> {
     use x11rb::connection::{Connection, RequestConnection};
     use x11rb::protocol::dri3;
     let (conn, screen) = x11rb::connect(None).ok()?;
+    // A stale WAYLAND_DISPLAY can classify native Xorg as XWayland. Never move native
+    // X11 off its measured boot-VGA rule based on that environment hint alone.
+    conn.extension_information("XWAYLAND").ok()??;
     conn.extension_information(dri3::X11_EXTENSION_NAME)
         .ok()??;
     let root = conn.setup().roots.get(screen)?.root;
@@ -148,12 +166,6 @@ fn xwayland_gpu() -> Option<Gpu> {
     meta.file_type().is_char_device().then_some(())?;
     gpu_from_dev(Path::new("/sys"), meta.rdev())
 }
-
-use wayland_client::protocol::{wl_callback, wl_registry};
-use wayland_client::{Connection, Dispatch, QueueHandle, delegate_noop};
-use wayland_protocols::wp::linux_dmabuf::zv1::client::{
-    zwp_linux_dmabuf_feedback_v1, zwp_linux_dmabuf_v1,
-};
 
 #[derive(Default)]
 struct Feedback {
@@ -322,6 +334,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         let pci = root.join("devices/pci0000:00/0000:01:00.0");
         std::fs::create_dir_all(&pci).unwrap();
+        let pci_bus = root.join("bus/pci");
+        std::fs::create_dir_all(&pci_bus).unwrap();
+        std::os::unix::fs::symlink(&pci_bus, pci.join("subsystem")).unwrap();
         std::fs::write(pci.join("device"), "0x2F18\n").unwrap();
         std::fs::write(pci.join("vendor"), "0x10de\n").unwrap();
         // High minor bits matter too; don't hand-roll an 8-bit major/minor split.
@@ -339,6 +354,16 @@ mod tests {
         std::fs::write(pci.join("device"), "0x10000").unwrap();
         assert_eq!(gpu_from_dev(&root, libc::makedev(226, 0)), None);
         std::fs::write(pci.join("device"), "0x2f18").unwrap();
+        std::fs::remove_file(pci.join("subsystem")).unwrap();
+        assert_eq!(gpu_from_dev(&root, libc::makedev(226, 0)), None);
+        let virtio_bus = root.join("bus/virtio");
+        std::fs::create_dir_all(&virtio_bus).unwrap();
+        std::os::unix::fs::symlink(&virtio_bus, pci.join("subsystem")).unwrap();
+        std::fs::write(pci.join("vendor"), "0x1af4").unwrap();
+        std::fs::write(pci.join("device"), "0x0010").unwrap();
+        assert_eq!(gpu_from_dev(&root, libc::makedev(226, 0)), None);
+        std::fs::remove_file(pci.join("subsystem")).unwrap();
+        std::os::unix::fs::symlink(&pci_bus, pci.join("subsystem")).unwrap();
         std::fs::remove_file(pci.join("vendor")).unwrap();
         assert_eq!(gpu_from_dev(&root, libc::makedev(226, 0)), None);
         assert_eq!(decode_dev(&[]), None);
@@ -358,6 +383,9 @@ mod tests {
         ] {
             let device = root.join(name).join("device");
             std::fs::create_dir_all(&device).unwrap();
+            let pci_bus = root.join("bus/pci");
+            std::fs::create_dir_all(&pci_bus).unwrap();
+            std::os::unix::fs::symlink(&pci_bus, device.join("subsystem")).unwrap();
             for (file, text) in [("device", id), ("boot_vga", boot), ("vendor", vendor)] {
                 std::fs::write(device.join(file), format!("{text}\n")).unwrap();
             }
@@ -386,21 +414,55 @@ mod tests {
     }
 
     #[test]
-    fn aquamarine_uses_only_the_first_entry() {
+    fn aquamarine_skips_empty_missing_and_follows_aliases() {
+        let root = std::env::temp_dir().join(format!("capri-gpu-aq-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        // /dev/null supplies a real char-device dev_t without root/mknod or GPU hardware.
+        let alias = root.join("gpu-nvidia");
+        std::os::unix::fs::symlink("/dev/null", &alias).unwrap();
+        let dev = std::fs::metadata(&alias).unwrap().rdev();
+        let pci = root.join(format!(
+            "dev/char/{}:{}/device",
+            libc::major(dev),
+            libc::minor(dev)
+        ));
+        let pci_bus = root.join("bus/pci");
+        std::fs::create_dir_all(&pci).unwrap();
+        std::fs::create_dir_all(&pci_bus).unwrap();
+        std::os::unix::fs::symlink(&pci_bus, pci.join("subsystem")).unwrap();
+        std::fs::write(pci.join("device"), "0x2f18").unwrap();
+        std::fs::write(pci.join("vendor"), "0x10de").unwrap();
+        let missing = root.join("missing");
         for value in [
-            "/dev/dri/gpu-nvidia:/dev/dri/gpu-intel",
-            " /dev/dri/gpu-nvidia : /dev/dri/gpu-intel",
-            "/dev/dri/gpu-nvidia:",
+            alias.display().to_string(),
+            format!(" :{}:: {} :/dev/zero:", missing.display(), alias.display()),
         ] {
-            assert_eq!(aq_first(value), Some(Path::new("/dev/dri/gpu-nvidia")));
+            assert_eq!(aq_first(&value), Some(PathBuf::from("/dev/null")));
+            assert_eq!(aq_gpu(&root, &value), Some(nvidia()));
         }
+        for value in [
+            "".to_string(),
+            " : : ".into(),
+            missing.display().to_string(),
+        ] {
+            assert_eq!(aq_first(&value), None);
+            assert_eq!(aq_gpu(&root, &value), None);
+        }
+        // Don't silently choose a secondary GPU if the first existing device cannot resolve.
         assert_eq!(
-            aq_first("/dev/dri/card0"),
-            Some(Path::new("/dev/dri/card0"))
+            aq_gpu(&root, &format!("/dev/zero:{}", alias.display())),
+            None
         );
-        for value in ["", " ", ":/dev/dri/card1", "card0:/dev/dri/card1"] {
-            assert_eq!(aq_first(value), None, "{value:?}");
-        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn single_gpu_keeps_all_drivers_available() {
+        assert!(!narrow_drivers(0));
+        assert!(!narrow_drivers(1));
+        assert!(narrow_drivers(2));
+        assert!(narrow_drivers(3));
     }
 
     #[test]
@@ -413,7 +475,7 @@ mod tests {
         );
         assert_eq!(
             pick_in(Backend::Wayland, &cards, || None, || Some(nvidia()), never),
-            Some((nvidia(), "AQ_DRM_DEVICES first entry"))
+            Some((nvidia(), "AQ_DRM_DEVICES first existing entry"))
         );
         assert_eq!(
             pick_in(Backend::Wayland, &cards, || None, || None, never),

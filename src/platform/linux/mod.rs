@@ -278,7 +278,9 @@ pub fn backend_notes() -> &'static [String] {
 ///   and for `connect`. What she has to say about it (`backend_notes`: an XWayland she picked
 ///   herself, what she ignored) waits for her log's header: `connect` says it.
 ///
-/// Each knob below was measured on bella (release, `ps` RSS 6 s after start, see LOG.md):
+/// The X11 knobs below were measured on bella (release, `ps` RSS 6 s after start, see LOG.md).
+/// Hyprland/NVIDIA tuning is unmeasured: observed ~237 MB RSS there versus ~130 MB on
+/// i3/iGPU, but both compositor and GPU changed; their effects have not been separated.
 ///
 /// * X11: render on the boot VGA device (the iGPU on a hybrid laptop). On bella every
 ///   vkQueuePresent to this 32-bit override-redirect window busy-waited ~2.3 s on the NVIDIA
@@ -324,17 +326,22 @@ pub fn process_setup() {
     let cards = gpu::cards();
     if let Some((gpu, reason)) = gpu::pick(b, &cards) {
         let gpu::Gpu { id, vendor } = gpu;
-        elog!("synaps-avatar: {} GPUs, rendering on {id} (vendor {vendor}; {reason}; SA_ANY_GPU=1 to let GPUI pick)", cards.len());
         // SAFETY: first thing in main, single-threaded; probes have closed their connections.
         unsafe { std::env::set_var("ZED_DEVICE_ID", &id) };
         // Only that vendor's Vulkan driver: the loader otherwise maps every ICD, and the
         // unused NVIDIA one alone was ~52 MB of RSS (libnvidia-gpucomp/rtcore/glcore).
-        if std::env::var_os("VK_DRIVER_FILES").is_none()
+        let mut narrowed = false;
+        if gpu::narrow_drivers(cards.len())
+            && std::env::var_os("VK_DRIVER_FILES").is_none()
             && std::env::var_os("VK_ICD_FILENAMES").is_none()
             && let Some(files) = vendor_icds(&vendor)
         {
             unsafe { std::env::set_var("VK_DRIVER_FILES", &files) };
+            narrowed = true;
         }
+        let plural = if cards.len() == 1 { "" } else { "s" };
+        let drivers = if narrowed { "narrowed to selected vendor" } else { "unchanged" };
+        elog!("synaps-avatar: {} GPU{plural}, rendering on {id} (vendor {vendor}; {reason}; VK_DRIVER_FILES {drivers}; SA_ANY_GPU=1 to let GPUI pick)", cards.len());
     }
 }
 

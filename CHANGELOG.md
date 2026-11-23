@@ -9,6 +9,11 @@
   as a cover; bars, docks, side panels and popups still do. A modal overlay that big (a launcher's or
   logout screen's dimmer) doesn't count either, so she may sit on what it hides: `hyprctl layers`
   doesn't say which layers take the keyboard.
+- **Hyprland/NVIDIA:** select the compositor's GPU before Vulkan starts, fixing black boxes
+  when NVIDIA is primary. The XWayland fallback selects its X screen's GPU, so its window should
+  open instead of reporting no compatible adapter (not yet run on XWayland with NVIDIA). Single-GPU Wayland is also pinned to the
+  compositor's GPU, but its Vulkan driver list is left unchanged; vendor narrowing is only
+  for multi-GPU machines. Native X11 keeps its boot-VGA workaround.
 
 ## 1.2.0 (2026-11-23)
 

@@ -465,8 +465,14 @@ included, and `SA_BACKEND=wayland` keeps her on Wayland (Hyprland only, no fallb
 Wayland session it's an error); any case, and another value is ignored with a line in her log.
 Unset, a Wayland desktop that isn't Hyprland runs her through XWayland when it has one
 ([INSTALL](INSTALL.md#gnome-kde-and-other-wayland-desktops)). `SA_COMPOSITED=0|1` overrides
-`[display] composited`. `SA_ANY_GPU=1` lets GPUI pick the GPU (by default it uses the boot VGA
-device), `SA_GL=1` brings back GPUI's GL probe, `SA_TIMING=1` logs Enter → first reply text →
+`[display] composited`. `SA_ANY_GPU=1` lets GPUI pick the GPU. By default, native Wayland
+follows the compositor's linux-dmabuf main device, then the first existing `AQ_DRM_DEVICES`
+entry, then boot VGA. XWayland follows its X screen via DRI3 (only when the server advertises
+`XWAYLAND`), then boot VGA. Native X11 keeps the boot-VGA rule on multi-GPU machines.
+`ZED_DEVICE_ID` overrides automatic selection. Automatic `VK_DRIVER_FILES` narrowing is only
+for multi-GPU machines and never overrides `VK_DRIVER_FILES` or `VK_ICD_FILENAMES` supplied
+by you; single-GPU Wayland is pinned to its compositor's device but its driver list stays alone.
+`SA_GL=1` brings back GPUI's GL probe, `SA_TIMING=1` logs Enter → first reply text →
 first word on screen, `SA_DEBUG=1` logs attach mode switches, and `SA_RESPAWN_AFTER=<s>` sets the
 offline time before the client is re-created (tests).
 `CAPRI_VOICE_SOCK` points her at a voice sidecar socket other than `$XDG_RUNTIME_DIR/capri-voice.sock`.
