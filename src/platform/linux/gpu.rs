@@ -347,6 +347,45 @@ mod tests {
     }
 
     #[test]
+    fn boot_vga_inventory_keeps_the_x11_rule() {
+        let root = std::env::temp_dir().join(format!("capri-gpu-cards-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for (name, id, boot, vendor) in [
+            ("card0", "0x2f18", "0", "0x10de"),
+            ("card1", "0x7d67", "1", "0x8086"),
+            ("card1-eDP-1", "0x7d67", "1", "0x8086"),
+            ("renderD128", "0x2f18", "0", "0x10de"),
+        ] {
+            let device = root.join(name).join("device");
+            std::fs::create_dir_all(&device).unwrap();
+            for (file, text) in [("device", id), ("boot_vga", boot), ("vendor", vendor)] {
+                std::fs::write(device.join(file), format!("{text}\n")).unwrap();
+            }
+        }
+        let never = || panic!("X11 must not probe either display server");
+        let cards = cards_in(&root);
+        assert_eq!(cards.len(), 2);
+        assert_eq!(
+            pick_in(Backend::X11, &cards, never, never, never),
+            Some((intel(), "boot VGA device"))
+        );
+        // A DRM card without PCI IDs still counts, just as in the previous X11 code.
+        std::fs::remove_dir_all(root.join("card0/device")).unwrap();
+        let cards = cards_in(&root);
+        assert_eq!(cards.len(), 2);
+        assert_eq!(
+            pick_in(Backend::X11, &cards, never, never, never),
+            Some((intel(), "boot VGA device"))
+        );
+        std::fs::remove_file(root.join("card1/device/device")).unwrap();
+        assert_eq!(
+            pick_in(Backend::X11, &cards_in(&root), never, never, never),
+            None
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn aquamarine_uses_only_the_first_entry() {
         for value in [
             "/dev/dri/gpu-nvidia:/dev/dri/gpu-intel",
