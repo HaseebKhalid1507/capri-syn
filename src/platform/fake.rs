@@ -9,6 +9,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 const BODY: WinId = 1;
+/// Her second body host (`fake_hosts`: the second output's, dormant at first).
+const HOST_B: WinId = 2;
 /// Her body's size here (the contract places effects inside it).
 const BODY_SIZE: (i32, i32) = (300, 400);
 
@@ -34,8 +36,14 @@ struct World {
     next: WinId,
     pointer: (i32, i32),
     focus: Option<WinId>,
+    /// The body host she shows in (`Caps::host_per_output`; else her one window, `BODY`):
+    /// `body_at` and `input` are its.
+    body: WinId,
     body_at: (i32, i32),
     input: Vec<ShapeRect>,
+    /// Her other body hosts: where each was left, and its input region (a dormant host takes
+    /// none, as a layer shell host doesn't: `Stage::set_body`).
+    dormant: HashMap<WinId, ((i32, i32), Vec<ShapeRect>)>,
     /// None: all of the window.
     visible: Option<Vec<ShapeRect>>,
     /// Effect layers: origin and rects.
@@ -200,7 +208,20 @@ impl Stage for FakeStage {
         Ok(BODY)
     }
     fn body(&self) -> WinId {
-        BODY
+        self.0.w().body
+    }
+    /// Into host `s`: it has what it had dormant (no input region); the one she left stays where
+    /// it was and takes no input (as the Hyprland stage's does).
+    fn set_body(&self, s: WinId) {
+        let mut w = self.0.w();
+        if s == w.body {
+            return;
+        }
+        let (at, input) = w.dormant.remove(&s).unwrap_or_default();
+        let left = std::mem::replace(&mut w.body_at, at);
+        w.input = input;
+        let old = std::mem::replace(&mut w.body, s);
+        w.dormant.insert(old, (left, Vec::new()));
     }
     fn move_to(&self, x: i32, y: i32) -> Result<()> {
         self.0.w().body_at = (x, y);
@@ -286,6 +307,17 @@ impl FakeDriver {
         self.0.hint(Hint::Mapped(id));
         id
     }
+
+    /// Her surface that takes the pointer at root (x, y), by input regions: the host she shows
+    /// in, or a dormant one (they take none). None: someone else's.
+    fn surface_at(&self, x: i32, y: i32) -> Option<WinId> {
+        let w = self.0.w();
+        let on = |at: (i32, i32), r: &[ShapeRect]| crate::shape::hit(r, x - at.0, y - at.1);
+        if on(w.body_at, w.input.as_slice()) {
+            return Some(w.body);
+        }
+        w.dormant.iter().find(|(_, (at, r))| on(*at, r.as_slice())).map(|(id, _)| *id)
+    }
 }
 
 impl Driver for FakeDriver {
@@ -336,8 +368,9 @@ impl Driver for FakeDriver {
         self.0.w().pointer = (x, y);
     }
     fn body_rect(&mut self) -> Option<WinRect> {
-        let (x, y) = self.0.w().body_at;
-        Some(WinRect { id: BODY, x, y, w: BODY_SIZE.0, h: BODY_SIZE.1 })
+        let w = self.0.w();
+        let (x, y) = w.body_at;
+        Some(WinRect { id: w.body, x, y, w: BODY_SIZE.0, h: BODY_SIZE.1 })
     }
     /// What a server would paint: each layer's rects, at its origin.
     fn fx_rects(&mut self) -> Vec<WinRect> {
@@ -381,7 +414,7 @@ fn fake(target_events: bool) -> (Os, FakeDriver) {
 
 /// `keyboard_on_input`: the keyboard comes only on his input (Windows' rule).
 fn fake_with(target_events: bool, keyboard_on_input: bool) -> (Os, FakeDriver) {
-    let world = World { root: (1600, 1000), monitors: vec![Monitor { primary: true, x: 0, y: 0, w: 1600, h: 1000 }], next: 100, ..World::default() };
+    let world = World { root: (1600, 1000), monitors: vec![Monitor { primary: true, x: 0, y: 0, w: 1600, h: 1000 }], next: 100, body: BODY, ..World::default() };
     let caps = Caps { shape_mode: true, target_events, fx_layers: true, costly_redraw: false, implicit_grab: true, goal_geometry: false, layout_events: false, host_per_output: false, keyboard_on_input };
     let f = Arc::new(Fake { world: Mutex::new(world), hint: Mutex::new(None), session: Mutex::new(None), caps });
     (Os::new(Arc::new(FakeDesktop(f.clone())), Box::new(FakeStage(f.clone()))), FakeDriver(f))
@@ -702,4 +735,132 @@ fn effects_fit_in_her_window_when_composited() {
     os.fx_reroute();
     os.fx_hide();
     assert!(staged(&mut d).is_empty() && os.fx_scene(false).is_empty() && os.fx_scene(true).is_empty());
+}
+
+/// Like Hyprland on bella: a body host per output (eDP-1 2560×1600, DP-2 2560×1440 right of
+/// it), no implicit grab. She shows in `BODY` on eDP-1; `HOST_B` waits dormant on DP-2.
+fn fake_hosts() -> (Os, FakeDriver) {
+    let mons = vec![Monitor { primary: true, x: 0, y: 0, w: 2560, h: 1600 }, Monitor { primary: false, x: 2560, y: 0, w: 2560, h: 1440 }];
+    let dormant = HashMap::from([(HOST_B, ((2560, 0), Vec::new()))]);
+    let world = World { root: (5120, 1600), monitors: mons.clone(), next: 100, body: BODY, dormant, ..World::default() };
+    let caps = Caps { shape_mode: false, target_events: false, fx_layers: false, costly_redraw: true, implicit_grab: false, goal_geometry: true, layout_events: true, host_per_output: true, keyboard_on_input: false };
+    let f = Arc::new(Fake { world: Mutex::new(world), hint: Mutex::new(None), session: Mutex::new(None), caps });
+    let os = Os::new(Arc::new(FakeDesktop(f.clone())), Box::new(FakeStage(f.clone())));
+    os.set_body_size(BODY_SIZE.0, BODY_SIZE.1);
+    os.add_host(BODY, mons[0].clone());
+    os.add_host(HOST_B, mons[1].clone());
+    (os, FakeDriver(f))
+}
+
+/// Hyprland's pointer focus around a press (`InputManager::mouseMoveUnified`): while the button
+/// is down and some surface holds the keyboard (`keep`), the pointer stays on the surface it
+/// went down on wherever it moves; else each motion hit-tests the input regions under it. A
+/// press or a release goes to the surface focused then: one of hers, or None (someone else's).
+struct Seat {
+    keep: bool,
+    down: bool,
+    focus: Option<WinId>,
+}
+
+impl Seat {
+    fn new(keep: bool) -> Seat {
+        Seat { keep, down: false, focus: None }
+    }
+
+    /// The pointer moves to root (x, y).
+    fn to(&mut self, d: &mut FakeDriver, x: i32, y: i32) {
+        d.warp(x, y);
+        let kept = self.down && self.keep && self.focus.is_some();
+        if !kept {
+            self.focus = d.surface_at(x, y);
+        }
+    }
+
+    /// The button goes down or up: where it goes.
+    fn button(&mut self, down: bool) -> Option<WinId> {
+        self.down = down;
+        self.focus
+    }
+}
+
+/// Her figure's input region, window-local; all of her window (the view's while a press lasts:
+/// `Os::press_takes_window`).
+const FIGURE: [ShapeRect; 1] = [(100, 40, 100, 340)];
+const WHOLE: [ShapeRect; 1] = [(0, 0, BODY_SIZE.0 as u16, BODY_SIZE.1 as u16)];
+/// Where the press holds her window: the pointer is this far into it.
+const GRIP: (i32, i32) = (150, 200);
+
+/// She stands on eDP-1 and a press lands on her torso, taken as the view takes one
+/// (`Avatar::mouse_down`): held, all of her window takes the pointer. Where the press went.
+fn press_on_her(os: &Os, d: &mut FakeDriver, seat: &mut Seat) -> Option<WinId> {
+    os.move_to(1000, 600).unwrap();
+    os.set_shapes(Some(&FIGURE), None).unwrap();
+    seat.to(d, 1000 + GRIP.0, 600 + GRIP.1);
+    let on = seat.button(true);
+    os.set_held(true, false);
+    os.set_shapes(Some(&WHOLE), None).unwrap();
+    on
+}
+
+/// Carried to each x in turn, y kept, her window a frame behind the pointer (`rag_follow`). The
+/// view sends no region meanwhile: all of her window, unchanged.
+fn carry(os: &Os, d: &mut FakeDriver, seat: &mut Seat, xs: impl IntoIterator<Item = i32>, y: i32) {
+    for x in xs {
+        seat.to(d, x, y);
+        os.move_to(x - GRIP.0, y - GRIP.1).unwrap();
+    }
+}
+
+/// A drag that ends on another output, where her body has a host per output (Hyprland, bella's
+/// eDP-1 and DP-2): pressed on her in host A, carried into host B, let go. The release comes to a
+/// host of hers on both of Hyprland's ways with a held button (`Seat`): kept on the surface
+/// pressed (host A, which no longer shows her: its view hands the release to her,
+/// `host::HostView`), or hit-tested under the pointer, where host B must take it. B has her input
+/// region from the handover on: a dormant host has none, and the view doesn't send it again (all
+/// of her window while pressed: unchanged). Before, B took nothing and the release went to
+/// whatever was under her, or to A, which dropped it: she hung held for good.
+#[test]
+fn a_drag_across_outputs_is_let_go_on_a_host_of_hers() {
+    for keep in [false, true] {
+        let (os, mut d) = fake_hosts();
+        let mut seat = Seat::new(keep);
+        assert_eq!(press_on_her(&os, &mut d, &mut seat), Some(BODY), "the press lands on her in host A (eDP-1)");
+        carry(&os, &mut d, &mut seat, (1200..=3200).step_by(100), 800);
+        assert_eq!((os.take_host_change(), os.body()), (Some(HOST_B), HOST_B), "carried into DP-2's host");
+        assert_eq!(d.0.w().input, WHOLE, "her region went with her into host B");
+        assert_eq!(d.surface_at(1150, 800), None, "host A takes no input once she left it");
+        carry(&os, &mut d, &mut seat, [3210], 805);
+        let (want, why) = if keep { (BODY, "kept on the surface pressed: host A") } else { (HOST_B, "hit-tested under the pointer: host B") };
+        assert_eq!(seat.button(false), Some(want), "let go over DP-2 (keep {keep}): {why}");
+    }
+    // Let go in the frame she crossed in: Hyprland hasn't looked under the pointer since, so the
+    // pointer is still host A's either way.
+    for keep in [false, true] {
+        let (os, mut d) = fake_hosts();
+        let mut seat = Seat::new(keep);
+        press_on_her(&os, &mut d, &mut seat);
+        carry(&os, &mut d, &mut seat, (1200..=2600).step_by(100), 800);
+        assert_eq!(os.body(), HOST_B, "she crossed at the outputs' edge");
+        assert_eq!(seat.button(false), Some(BODY), "let go as she crossed (keep {keep}): host A");
+    }
+}
+
+/// A release that went to someone else's surface: a flick that outran her window (Hyprland looked
+/// under the pointer before she caught up) let go before Hyprland looked again. Nothing of hers
+/// heard it, so the view still holds the press, and all of her window still takes the pointer,
+/// in the host she's in now: his next press lands on her, and ends the one that went astray
+/// (`Avatar::mouse_down`). Before, host B took nothing: no press of his could reach her again.
+#[test]
+fn after_a_release_that_went_astray_her_next_press_lands_on_her() {
+    let (os, mut d) = fake_hosts();
+    let mut seat = Seat::new(false);
+    press_on_her(&os, &mut d, &mut seat);
+    carry(&os, &mut d, &mut seat, (1200..=2400).step_by(100), 800);
+    // One flick 800 px on, onto DP-2, and the button comes up before her window caught up.
+    carry(&os, &mut d, &mut seat, [3200], 800);
+    assert_eq!(os.body(), HOST_B, "she followed into DP-2's host");
+    assert_eq!(seat.button(false), None, "the release went to someone else's surface");
+    // Still held: her window still all hers to press, under the pointer.
+    seat.to(&mut d, 3205, 802);
+    assert_eq!(seat.button(true), Some(HOST_B), "his next press lands on her, in host B");
 }

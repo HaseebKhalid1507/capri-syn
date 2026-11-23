@@ -10,6 +10,11 @@
   logout screen's dimmer) doesn't count either, so she may sit on what it hides: `hyprctl layers`
   doesn't say which layers take the keyboard.
 
+- **Hyprland: a drag let go on the other monitor lets her go** (she falls, lands on a window or is
+  thrown, as on one monitor) instead of hanging held for good with no click reaching her. The host
+  she crosses into takes the pointer at once, a release that comes to the host she left still lets
+  her go, and should a release go astray anyway, your next click on her or `drop` ends the hold.
+
 ## 1.2.0 (2026-11-23)
 
 She's restless, turns to another loop while she sits or stands, and changes outfit now and then. Her

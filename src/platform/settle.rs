@@ -86,6 +86,11 @@ impl Settle {
         }
     }
 
+    /// The region out (a body host she moves into gets it: `Os::send_move`).
+    pub fn out(&self) -> &[ShapeRect] {
+        &self.out
+    }
+
     fn sent(&mut self, r: Vec<ShapeRect>, now: Instant) {
         self.out = r;
         self.right();

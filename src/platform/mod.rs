@@ -603,7 +603,8 @@ pub trait Stage {
     /// Her body's id (0 before `adopt`): the host she shows in.
     fn body(&self) -> WinId;
     /// She shows in body host `s` from now on (`Caps::host_per_output`): body moves, shapes
-    /// and the keyboard go to it; the one she left takes no input.
+    /// and the keyboard go to it; the one she left takes no input. The core sends her input
+    /// region to `s` right after (`Os::send_move`): it keeps none of its own meanwhile.
     fn set_body(&self, _s: WinId) {}
     /// Body origin, root px.
     fn move_to(&self, x: i32, y: i32) -> Result<()>;
