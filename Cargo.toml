@@ -48,7 +48,11 @@ zbus = { version = "5.19", default-features = false, features = ["async-io", "bl
 # Its Linux platform, vendored and patched (vendor/gpui-pre-linux/PATCHES.md): `layer_ctl`, her
 # layer surfaces' margins, input region and keyboard at run time (the Hyprland backend).
 gpui-pre-linux = "=0.3.12"
-x11rb = { version = "0.13", features = ["shape", "randr", "xfixes", "screensaver", "xinput", "render"] }
+x11rb = { version = "0.13", features = ["shape", "randr", "xfixes", "screensaver", "xinput", "render", "dri3"] }
+
+# Probe the compositor before GPUI initializes Vulkan (already locked through GPUI).
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

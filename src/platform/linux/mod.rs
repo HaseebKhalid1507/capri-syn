@@ -2,6 +2,7 @@
 //! the session bus's services (media players, notifications, logind, a tray icon some day).
 //! Shared by every Linux backend (X11, Hyprland).
 
+mod gpu;
 mod media;
 mod notifications;
 
@@ -279,10 +280,13 @@ pub fn backend_notes() -> &'static [String] {
 ///
 /// Each knob below was measured on bella (release, `ps` RSS 6 s after start, see LOG.md):
 ///
-/// * Render on the boot VGA device (the iGPU on a hybrid laptop) unless `ZED_DEVICE_ID` is
-///   set. On bella every vkQueuePresent to this 32-bit override-redirect window
-///   busy-waited ~2.3 s on the NVIDIA dGPU (0.4 fps); the Intel iGPU presents at once. A
-///   desktop pet belongs on the low-power GPU anyway.
+/// * X11: render on the boot VGA device (the iGPU on a hybrid laptop). On bella every
+///   vkQueuePresent to this 32-bit override-redirect window busy-waited ~2.3 s on the NVIDIA
+///   dGPU (0.4 fps); the Intel iGPU presents at once. Native Wayland instead follows the
+///   compositor's linux-dmabuf main device (then AQ_DRM_DEVICES, then boot VGA); XWayland
+///   follows the X server's screen via DRI3. Pinning the iGPU when the compositor uses NVIDIA
+///   can produce black surfaces or no compatible adapter. `ZED_DEVICE_ID` / `SA_ANY_GPU`
+///   leave selection to the user / GPUI.
 /// * Keep GPUI's GL fallback from probing EGL when a Vulkan driver is installed. The probe
 ///   loads every EGL vendor (NVIDIA's, Mesa's llvmpipe with LLVM) and 50 threads that stay
 ///   for the life of the process: 371 → 226 MB RSS. `SA_GL=1` keeps it.
@@ -317,27 +321,17 @@ pub fn process_setup() {
     if std::env::var_os("ZED_DEVICE_ID").is_some() || std::env::var_os("SA_ANY_GPU").is_some() {
         return;
     }
-    let read = |p: std::path::PathBuf| std::fs::read_to_string(p).map(|s| s.trim().to_string()).unwrap_or_default();
-    let mut cards = Vec::new();
-    for e in std::fs::read_dir("/sys/class/drm").into_iter().flatten().flatten() {
-        let name = e.file_name().to_string_lossy().into_owned();
-        if !name.starts_with("card") || name.contains('-') {
-            continue;
-        }
-        let dev = e.path().join("device");
-        cards.push((read(dev.join("device")), read(dev.join("boot_vga")) == "1", read(dev.join("vendor"))));
-    }
-    if cards.len() < 2 {
-        return;
-    }
-    if let Some((id, _, vendor)) = cards.iter().find(|c| c.1 && !c.0.is_empty()) {
-        elog!("synaps-avatar: {} GPUs, rendering on the boot VGA device {id} (SA_ANY_GPU=1 to let GPUI pick)", cards.len());
-        unsafe { std::env::set_var("ZED_DEVICE_ID", id) };
+    let cards = gpu::cards();
+    if let Some((gpu, reason)) = gpu::pick(b, &cards) {
+        let gpu::Gpu { id, vendor } = gpu;
+        elog!("synaps-avatar: {} GPUs, rendering on {id} (vendor {vendor}; {reason}; SA_ANY_GPU=1 to let GPUI pick)", cards.len());
+        // SAFETY: first thing in main, single-threaded; probes have closed their connections.
+        unsafe { std::env::set_var("ZED_DEVICE_ID", &id) };
         // Only that vendor's Vulkan driver: the loader otherwise maps every ICD, and the
         // unused NVIDIA one alone was ~52 MB of RSS (libnvidia-gpucomp/rtcore/glcore).
         if std::env::var_os("VK_DRIVER_FILES").is_none()
             && std::env::var_os("VK_ICD_FILENAMES").is_none()
-            && let Some(files) = vendor_icds(vendor)
+            && let Some(files) = vendor_icds(&vendor)
         {
             unsafe { std::env::set_var("VK_DRIVER_FILES", &files) };
         }
