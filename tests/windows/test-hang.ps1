@@ -11,7 +11,7 @@
 #   tests\windows\test-hang.ps1 [-Exe PATH] [-Pack DIR] [-Seconds 60] [-With 'K=V', ...] [-Out DIR]
 #
 # -Exe: default target\release\synaps-avatar.exe. -Pack: her pack; default %TEMP%\sa-hang-pack,
-# built there as install.ps1 builds it (CapriCore at installer\manifest's pin + lachy, make-pack)
+# built there as install.ps1 builds it, but lean (CapriCore at installer\manifest's pin + lachy, make-pack)
 # unless it is there already (kept for the next run). -With: her environment. -Out: her log, her
 # stdout and, on a failure, a full minidump of her (taken before she is stopped); kept on a
 # failure (CI uploads it), removed on a pass. Default %TEMP%\sa-hang-<pid>.

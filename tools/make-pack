@@ -44,8 +44,9 @@ Optional desktop art (anim/; a pack without it still loads):
                      anim/lachy/sprites/*.png, capri.png, perch.png, cursor.png, emotes/<name>/ (unzipped),
                      LICENSE.md
   --mochi DIR|auto   mochiiwuff/capri-desktop at c011764, checked against tools/mochi-desktop-c011764.sha256.
-                     anim/mochi/*.png|webp, LICENSE. Show frames and fan art: LOCAL PERSONAL USE ONLY; never
-                     commit, publish or screenshot them anywhere public.
+                     anim/mochi/*.png|webp, LICENSE. Show frames, a fan cut-out and fan art: its licence
+                     (PolyForm Noncommercial 1.0.0) covers its code, not them; its README notes their
+                     character rights (NOTICE.md quotes it). Downloaded onto this machine, never in this repo.
   --mochi-hair MODE  her hair in the intro close-ups (anim/mochi/intro-*), which mochi drew black: `red`
                      (default: her avatar's red, shadow and starfield), `flat` (one red) or `original`.
                      tools/mochi_hair.py, deterministic, lossless WebP; anim.json pins the written bytes
@@ -342,11 +343,12 @@ def add_sides(out, srcs, pinned, geometry, hair=None, hair_mode="original"):
                           f"Credits (its README): {LACHY_CREDITS}\n")
         else:
             rights = readme_section((d / s["readme"]).read_text(), "Credits and rights")
-            notice.append(f"## Images from mochiiwuff/capri-desktop: LOCAL PERSONAL USE ONLY\n\n"
-                          f"`anim/mochi/` holds images from https://github.com/mochiiwuff/capri-desktop (commit {s['commit'][:7]}). "
-                          f"Its licence (PolyForm Noncommercial 1.0.0, {POLYFORM_NC}) covers its code only, not these "
-                          f"images. Its README, \"Credits and rights\":\n\n> {rights}\n\n{rn}\n\n"
-                          f"Never share, publish or commit these images (README, docs, screenshots, PRs).\n")
+            notice.append(f"## Images from mochiiwuff/capri-desktop\n\n"
+                          f"`anim/mochi/` holds images from https://github.com/mochiiwuff/capri-desktop (commit {s['commit'][:7]}), "
+                          f"downloaded onto this machine from that repository by capri-syn's tools/make-pack: capri-syn's "
+                          f"repository never contains or redistributes them. Its licence (PolyForm Noncommercial 1.0.0, "
+                          f"{POLYFORM_NC}; full terms: `anim/mochi/{s['license']}`) covers its code only, not these images; "
+                          f"the rights noted in its README apply to them. Its README, \"Credits and rights\":\n\n> {rights}\n\n{rn}\n")
     (anim / "anim.json").write_text(json.dumps(doc, indent=1) + "\n")
     return notice
 
@@ -523,7 +525,7 @@ def main(argv):
     for side in side_srcs:
         n = sum(1 for _ in (out / "anim" / side).rglob("*") if _.is_file())
         print(f"make-pack: + {SIDES[side]['repo']} @ {SIDES[side]['commit'][:7]} -> {out}/anim/{side}: {n} files"
-              + (f" (LOCAL PERSONAL USE ONLY; intro hair: {opts['--mochi-hair']})" if side == "mochi" else ""))
+              + (f" (intro hair: {opts['--mochi-hair']})" if side == "mochi" else ""))
     if flags["--upscale"]:
         cache = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "synaps-avatar/models"
         n = upscale(out, repo, flags["--record-upscale"], cache)

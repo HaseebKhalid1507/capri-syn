@@ -474,6 +474,14 @@ jobs:
           grep -q "(asks which brain: an account, a model on this machine, an API key, or later)" /tmp/dry.log
           grep -q "her brain: later. she shows NO BRAIN YET" /tmp/dry.log
           if grep -q 'login --provider' /tmp/dry.log; then echo "::error::a dry run with no --brain signed in"; exit 1; fi
+          # The full pack by default (mochi's art; the x2 strips as the manifest's pack_upscale says), and the opt-outs.
+          grep -q 'make-pack .* --lachy auto --mochi auto$' /tmp/dry.log
+          grep -q 'her pack .*capri (CapriCore v1.0.4 + lachy + mochi)' /tmp/dry.log
+          bash install.sh --dry-run --no-local-art --upscale >/tmp/dry-x2.log
+          grep -q 'make-pack .* --lachy auto --upscale$' /tmp/dry-x2.log
+          grep -q -- '--index-url https://download.pytorch.org/whl/cpu torch$' /tmp/dry-x2.log
+          bash install.sh --dry-run --upscale --no-upscale >/tmp/dry-no-x2.log
+          grep -q 'make-pack .* --lachy auto --mochi auto$' /tmp/dry-no-x2.log
           bash install.sh --dry-run --from-source --voice --watch
           curl -fsSL "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${CAPRI_INSTALL_REF}/install.sh" | bash -s -- --dry-run --with-local-art
           bash install.sh --dry-run --uninstall --purge

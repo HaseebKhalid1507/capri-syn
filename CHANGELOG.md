@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+- **The installers build her full pack by default.** mochi's art (her intro close-ups, the cut-ins and
+  the Line's faces, her hair repainted red) now comes with CapriCore and lachy's on every install path:
+  `install.sh`, `install.ps1`, her Windows installer's "Download her art" (a box under it, ticked) and
+  `steps.ps1 pack`. `--no-local-art` (`-NoLocalArt`, `/LOCALART=off`, the box unticked) leaves it out;
+  `--with-local-art` (`-WithLocalArt`, `steps.ps1 -LocalArt`) is still accepted and changes nothing.
+  Missing intro or cut-in animations? Run the install command again: a pack built without mochi's art
+  is built again with it.
+- **lachy's strips at x2, as an install option**: `--upscale` (`-Upscale`, `/UPSCALE=on`, its box on the
+  pack page) runs `make-pack --upscale` with torch's CPU build in the installer's own Python. Off by
+  default (`pack_upscale` in `installer/manifest`; `--no-upscale` says so): measured on an i5-13420H it
+  is ~255 MB more to download (torch's CPU wheel and scipy; ~1.1 GB in the venv, +219 MB of strips) and
+  44 min of CPU (4 threads at `nice 19`; 144 CPU-minutes).
+  Neither extra can fail an install: a failed upscale (or its pip) is said and her pack is built without
+  the x2 strips; mochi's art that can't be fetched is said and left out. Her Windows installer now
+  carries mochi's pins and `tools/mochi_hair.py`, and both installers `tools/upscale_art.py` and its pins.
+- **What the installers say about her art** is what's true: it's downloaded onto your machine straight
+  from its artists' repositories, capri-syn's repository never contains or redistributes it, and their
+  licences (PolyForm Noncommercial) and the character rights their READMEs note apply. The "local
+  personal use only" warnings are gone from the prompts, the logs and the pack's `NOTICE.md`, which
+  keeps every Required Notice line and quotes mochi's rights statement.
+
 - **Hyprland Lua summon bindings**: the installer prefers `hyprland.lua`, writes Lua press/release
   bindings and tags them so live collision checks keep the same key on reinstall. The optional
   mic toggle is checked too; occupied chords fall back together to Super+Alt+C / Super+Alt+Ctrl+C.

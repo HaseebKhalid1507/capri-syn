@@ -316,7 +316,9 @@ class DesktopArt(SidesBase):
         self.assertIn("Qewiw (mix_qewiw1412_86144)", n)
         self.assertIn("> The rights paragraph, over two lines.\n", n, "its rights statement, read from its README")
         self.assertNotIn("not part of it", n)
-        self.assertIn("LOCAL PERSONAL USE ONLY", n)
+        self.assertNotIn("PERSONAL USE", n, "no personal-use-only warning: the rights are its README's, quoted")
+        self.assertIn("never contains or redistributes them", n)
+        self.assertIn("covers its code only, not these images", n)
 
     def test_mochi_hair_flat_and_original(self):
         d = str(self.sides["mochi"].dir)

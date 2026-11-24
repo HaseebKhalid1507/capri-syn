@@ -189,7 +189,9 @@ function Close-SignIn { Get-CimInstance Win32_Process | Where-Object { $_.Comman
 $log = Join-Path ([IO.Path]::GetTempPath()) "capri-setup-wizard-$PID.log"
 # The shots' desktop quiet (the runner's console minimized, a flat backdrop), before the wizard.
 try { Clear-ShotDesktop } catch { Write-Host "  (desktop stays as it is: $($_.Exception.Message))" }
-$p = Start-Process $Setup -ArgumentList "/LOG=`"$log`"" -PassThru
+# /LOCALART=off: the shots are public, and never show mochi's art (her pack's default has it:
+# test-setup-e2e.ps1 checks that). The pack page starts with its box unticked.
+$p = Start-Process $Setup -ArgumentList "/LOG=`"$log`" /LOCALART=off" -PassThru
 # Its handle now, while it runs: else its ExitCode is $null once it's gone.
 $null = $p.Handle
 # Run elevated (CI's runners are), Setup asks first, No its default: he says Yes here. Not elevated
@@ -236,7 +238,10 @@ foreach ($page in @(
     Get-Shot $page[1] -Title 'Setup - capri-syn*'
     if ($page[1] -eq 'her-brain') { Check (($t -match 'Install Synaps \(her brain, open source\)').Count -gt 0) 'her brain page offers to install Synaps' }
     if ($page[1] -eq 'her-voice') { Check (($t -match '^Talk to her$').Count -gt 0 -and ($t -match 'Read replies aloud').Count -gt 0) 'her voice page: talk, microphone, "hey Capri", replies aloud' }
-    if ($page[1] -eq 'her-pack') { Check (($t -match 'Download her art').Count -gt 0) 'her pack page offers the download' }
+    if ($page[1] -eq 'her-pack') {
+        Check (($t -match 'Download her art').Count -gt 0) 'her pack page offers the download'
+        Check (($t -match "^mochi's art").Count -gt 0 -and ($t -match "^lachy's strips at x2").Count -gt 0) "and its boxes: mochi's art, lachy's strips at x2"
+    }
     if ($page[1] -in 'destination', 'ready') { Test-WizardWindow $w "the $($page[1]) page" }
     Invoke-Button $w $page[2]
     Wait-Leave $w $page[0]

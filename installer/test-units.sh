@@ -1206,6 +1206,95 @@ INT
     exit "$fails"
 ) || fails=$((fails + $?))
 
+# Her pack (step_pack), on stand-ins: a venv python that is make-pack (FAIL=upscale|mochi|all fails
+# that run as make-pack does; pip fails with PIP_FAIL=1), her binary's --check, a cached CapriCore.
+# The full pack is the default; the x2 strips and mochi's art never fail the install; a pack built
+# before mochi's art was the default is built again with it.
+(
+    p=$tmp/pack-home
+    HOME=$p DATA=$p/.local/share CACHE_BASE=$p/.cache CACHE_ROOT=$p/.cache/synaps-avatar CACHE=$p/.cache/synaps-avatar/installer
+    PACK=$DATA/synaps-avatar/packs/capri RECEIPT=$DATA/synaps-avatar/install.receipt VENV=$CACHE/venv BIN=$p/bin LIB=$p/lib
+    M_pip_pack=fonttools==4.65.0 M_pip_local_art='numpy>=1.26,<3 Pillow>=10,<14' M_pip_upscale='torch scipy' M_pip_upscale_index=https://download.pytorch.org/whl/cpu
+    M_capricore_repo=CapriChooms/CapriCore M_capricore_commit=bc93892c751a73fdce14355b477dcdc775e46fd9 M_pack_upscale=off
+    RUN_REAL=1 LOCAL_ART=1 UPSCALE=''
+    # The receipt's meta lines for real here (above, a stand-in that keeps nothing).
+    eval "$(sed -n '/^rec_meta() {$/,/^}$/p' "$here/install.sh")"
+    mkdir -p "$VENV/bin" "$BIN" "$LIB/tools" "$LIB/packs/capri" "$CACHE/CapriCore-bc93892/docs" "$DATA/synaps-avatar"
+    touch "$CACHE/CapriCore-bc93892/docs/character-assets.md" "$LIB/tools/make-pack" "$LIB/tools/upscale_art.py" "$LIB/tools/lachy-x2.sha256"
+    printf '%s\n' "$M_pip_pack $M_pip_local_art" >"$VENV/.capri-pip"
+    cat >"$VENV/bin/python" <<'PY'
+#!/usr/bin/env bash
+if [ "$1" = -m ]; then echo "pip $*" >>"$CALLS"; [ "${PIP_FAIL:-0}" = 0 ] || { echo 'ERROR: No matching distribution found for torch'; exit 1; }; exit 0; fi
+shift; echo "make-pack $*" >>"$CALLS"
+out=$2; args=" $* "
+case ${FAIL:-}:$args in
+    all:*) echo "make-pack: $1 is not CapriCore v1.0.4 (3 file(s) differ)"; exit 1 ;;
+    upscale:*' --upscale '*) echo 'make-pack: + x2 strips'; echo 'make-pack: --upscale: 2 strip(s) differ from tools/lachy-x2.sha256 (another torch or CPU?)'; exit 1 ;;
+    mochi:*' --mochi '*) echo 'make-pack: --mochi auto: cannot download https://raw.githubusercontent.com/mochiiwuff/capri-desktop/c011764/LICENSE (HTTP Error 404)'; exit 1 ;;
+esac
+mkdir -p "$out/anim/lachy"; echo '{}' >"$out/sprites.json"
+case $args in *' --mochi '*) mkdir -p "$out/anim/mochi" ;; esac
+case $args in *' --upscale '*) mkdir -p "$out/anim/lachy/x2" ;; esac
+echo "make-pack: Capri -> $out"
+PY
+    printf '#!/bin/sh\necho "pack \\`Capri\\` ok: 69 frames"\n' >"$BIN/synaps-avatar"
+    chmod +x "$VENV/bin/python" "$BIN/synaps-avatar"
+    export CALLS=$p/calls
+    # One step_pack: its output in $p/out, its make-pack and pip runs in $p/calls, its exit code in PRC.
+    pack() { : >"$CALLS"; (step_pack) >"$p/out" 2>&1; PRC=$?; }
+    builds() { grep -c '^make-pack ' "$CALLS"; }
+    full=" --lachy auto --mochi auto"
+
+    pack
+    check "$([ "$PRC" = 0 ] && [ "$(builds)" = 1 ] && grep -q -- "$full\$" "$CALLS" && [ -d "$PACK/anim/mochi" ] && [ ! -d "$PACK/anim/lachy/x2" ] &&
+        [[ $(meta pack) == *-1-x0 ]] && echo 0)" "the default: one make-pack, lachy's and mochi's art, no x2 ($(grep '^make-pack ' "$CALLS" | grep -o -- ' --.*'); receipt: $(meta pack))"
+    check "$(grep -q 'with mochi.s art' "$p/out" && ! grep -qi 'personal use' "$p/out" && echo 0)" "and it says so, with no personal-use warning"
+    pack
+    check "$([ "$PRC" = 0 ] && [ "$(builds)" = 0 ] && grep -q 'up to date' "$p/out" && echo 0)" "again: up to date, nothing built"
+    # An install before this one: its pack without mochi's art, and the fingerprint it recorded then.
+    rm -rf "$PACK/anim/mochi"
+    sed -i 's/^\(meta\tpack\t\).*/\1f00dcafe0badf00-0/' "$RECEIPT"
+    pack
+    check "$([ "$PRC" = 0 ] && [ "$(builds)" = 1 ] && [ -d "$PACK/anim/mochi" ] && [[ $(meta pack) == *-1-x0 ]] && echo 0)" \
+        "an older install's pack (no mochi, its fingerprint): built again, the full pack ($(meta pack))"
+    LOCAL_ART=0 pack
+    check "$([ "$PRC" = 0 ] && [ "$(builds)" = 1 ] && grep -q ' --lachy auto$' "$CALLS" && [ ! -d "$PACK/anim/mochi" ] && [[ $(meta pack) == *-0-x0 ]] && echo 0)" \
+        "--no-local-art: without mochi's art ($(meta pack))"
+    # The x2 strips: their pip, then the build with them; a failed upscale warns and builds without.
+    rm -f "$VENV/.capri-pip-x2"
+    UPSCALE=1 pack
+    check "$([ "$PRC" = 0 ] && grep -q -- '--index-url https://download.pytorch.org/whl/cpu torch$' "$CALLS" && ! grep -q 'pypi.org' "$CALLS" &&
+        grep -q -- '--no-cache-dir scipy$' "$CALLS" && grep -q -- "$full --upscale\$" "$CALLS" && [ "$(builds)" = 1 ] &&
+        [ -d "$PACK/anim/lachy/x2" ] && [[ $(meta pack) == *-1-x1 ]] && echo 0)" "--upscale: torch from its CPU index alone, scipy from PyPI, then the full pack with the x2 strips ($(meta pack))"
+    UPSCALE=1 FAIL=upscale pack
+    check "$([ "$PRC" = 0 ] && [ "$(builds)" = 0 ] && echo 0)" "--upscale again: up to date"
+    rm -rf "$PACK"
+    UPSCALE=1 FAIL=upscale pack
+    check "$([ "$PRC" = 0 ] && [ "$(builds)" = 2 ] && tail -n1 "$CALLS" | grep -q -- "$full\$" && [ -d "$PACK/anim/mochi" ] && [ ! -d "$PACK/anim/lachy/x2" ] &&
+        grep -q "the x2 upscale didn't work (make-pack: --upscale: 2 strip(s) differ" "$p/out" && [[ $(meta pack) == *-1-x0 ]] && echo 0)" \
+        "a failed upscale: said, and her pack built without the x2 strips; the install goes on ($(meta pack))"
+    rm -f "$VENV/.capri-pip-x2"
+    UPSCALE=1 PIP_FAIL=1 pack
+    check "$([ "$PRC" = 0 ] && ! grep -q -- '--upscale' "$CALLS" && grep -q "pip couldn't install torch scipy" "$p/out" && [ ! -f "$VENV/.capri-pip-x2" ] && echo 0)" \
+        "torch's pip failing: said, no upscale tried, her pack as it was"
+    M_pack_upscale=on PIP_FAIL=1 pack
+    check "$([ "$PRC" = 0 ] && grep -q 'download.pytorch.org' "$CALLS" && echo 0)" "pack_upscale=on in the manifest: the x2 strips by default"
+    UPSCALE=0 M_pack_upscale=on pack
+    check "$([ "$PRC" = 0 ] && ! grep -q 'pytorch' "$CALLS" && echo 0)" "and --no-upscale says no"
+    # mochi's art failing: said, and her pack built without it. CapriCore failing fails the install.
+    rm -rf "$PACK"
+    FAIL=mochi pack
+    check "$([ "$PRC" = 0 ] && [ "$(builds)" = 2 ] && tail -n1 "$CALLS" | grep -q ' --lachy auto$' && [ -f "$PACK/sprites.json" ] && [ ! -d "$PACK/anim/mochi" ] &&
+        grep -q "mochi's art couldn't be added (make-pack: --mochi auto: cannot download" "$p/out" && [[ $(meta pack) == *-0-x0 ]] && echo 0)" \
+        "mochi's art failing to download: said, and her pack built without it ($(meta pack))"
+    rm -rf "$PACK"
+    UPSCALE=1 FAIL=all pack
+    r=$PRC
+    check "$([ "$r" != 0 ] && grep -q "make-pack couldn't build her pack" "$p/out" && [ ! -d "$PACK" ] && echo 0)" \
+        "CapriCore failing: the install stops (exit $r), after trying without the extras ($(builds) runs)"
+    exit "$fails"
+) || fails=$((fails + $?))
+
 if [ "$fails" -gt 0 ]; then
     echo "$fails install.sh unit check(s) failed"
     exit 1

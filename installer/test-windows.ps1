@@ -117,6 +117,7 @@ Test-HerLicence -App $app
 Check (Test-Path (Join-Path $pack 'sprites.json')) "her pack in $pack"
 Check (Test-Path (Join-Path $pack 'persona.md')) 'with her persona'
 Check (Test-Path (Join-Path $pack 'anim\lachy\LICENSE.md')) "and lachy's art, with its licence"
+Check (Test-Path (Join-Path $pack 'anim\mochi\LICENSE')) "and mochi's art, with its licence (the default)"
 Check (Test-Path $receipt) "a receipt ($receipt)"
 # The end: she's started (or it says why not); --yes is her brain later (nothing signed in to).
 $installText = Get-Content -Raw (Join-Path $logs 'install.log')
@@ -153,6 +154,17 @@ if ($installText -match "she's up \(") {
     Check ([bool]$stop) "a rerun stops the run going, by pid, and says so: $stop"
     Check ($rerun -match "she's up \(\d+ ms") 'and starts her again'
 }
+
+# 2b. --no-local-art: her pack again, without mochi's art. Then a rerun with the defaults builds the
+# full pack again: the upgrade of a pack made before mochi's art was the default.
+$code = Invoke-Installer 'lean' @('--yes', '--no-autostart', '--no-local-art', '--artifact', $Setup)
+$lean = Get-Content -Raw (Join-Path $logs 'lean.log')
+Check ($code -eq 0 -and $lean -notmatch 'up to date \(' -and -not (Test-Path (Join-Path $pack 'anim\mochi'))) "--no-local-art: her pack is built again, without mochi's art ($code)"
+Check ($lean -match 'her pack\s+capri \(CapriCore v1\.0\.4 \+ lachy\)') "and the summary says so: $([regex]::Match($lean, 'her pack\s+capri [^\r\n]*').Value)"
+$code = Invoke-Installer 'full' @('--yes', '--no-autostart', '--artifact', $Setup)
+$full = Get-Content -Raw (Join-Path $logs 'full.log')
+Check ($code -eq 0 -and $full -notmatch 'up to date \(' -and (Test-Path (Join-Path $pack 'anim\mochi\LICENSE'))) "a rerun with the defaults: the full pack again, mochi's art in it ($code)"
+Check ($full -match 'her pack\s+capri \(CapriCore v1\.0\.4 \+ lachy \+ mochi\)') "and the summary says so: $([regex]::Match($full, 'her pack\s+capri [^\r\n]*').Value)"
 
 # 3. --uninstall: nothing of hers is left; Synaps stays.
 $code = Invoke-Installer 'uninstall' @('--uninstall')

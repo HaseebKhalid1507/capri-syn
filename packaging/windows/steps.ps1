@@ -52,13 +52,17 @@
 #                            (her pack when it holds their marker, their Run\synaps-daemon, her voice).
 #
 # Her pack: CPython's embeddable package and pip (both pinned, SHA-256 checked) in -Cache, pip_pack
-# (fonttools) into it; CapriCore at capricore_commit (GitHub's tarball); then tools/make-pack with
-# `--lachy auto`, every file checked against tools/*.sha256; her --check on the result; then into
-# place. A pack these steps put there (it holds .capri-syn-pack) is replaced whole; any other (his own)
-# is moved aside to <pack>.pre-install-<date>, never deleted. One built from the same inputs is left
-# as it is. -From DIR places that pack folder instead of building one. Her art is never in this repo
-# or in her installer: it's downloaded here, on his machine. Never mochi's, unless -LocalArt
-# (install.ps1 --with-local-art, LOCAL PERSONAL USE ONLY).
+# (fonttools) and pip_local_art (numpy, Pillow: mochi's hair recolour) into it; CapriCore at
+# capricore_commit (GitHub's tarball); then tools/make-pack with `--lachy auto --mochi auto`, every
+# file checked against tools/*.sha256; her --check on the result; then into place. -NoLocalArt leaves
+# mochi's art out (-LocalArt, its old opt-in, changes nothing). -Upscale / -NoUpscale: lachy's strips
+# at x2 too, or not (default: the manifest's pack_upscale), with pip_upscale (torch) in the same
+# Python. The extras never fail the step: a failed upscale is built again without the x2 strips, then
+# a failure of mochi's art without it. A pack these steps put there (it holds .capri-syn-pack) is
+# replaced whole; any other (his own) is moved aside to <pack>.pre-install-<date>, never deleted. One
+# built from the same inputs is left as it is. -From DIR places that pack folder instead of building
+# one. Her art is never in this repo or in her installer: it's downloaded here, on his machine,
+# straight from its artists' repositories, and their terms apply (the pack's NOTICE.md).
 #
 # What it does is said for a person ("   + done", "   ! careful", "   text"); results are a key at the
 # left edge ("synaps: ok VERSION PATH", "brain: no", "daemon: running 3", "runvalue: set"); a failure is
@@ -79,6 +83,9 @@ param(
     [string]$Cache = (Join-Path $env:LOCALAPPDATA 'synaps-avatar\installer'),
     [switch]$KeepCache,
     [switch]$LocalArt,
+    [switch]$NoLocalArt,
+    [switch]$Upscale,
+    [switch]$NoUpscale,
     [switch]$Ours,
     [string]$VoiceFrom = '',
     [string]$Release = '',
@@ -929,22 +936,31 @@ function Test-Pack([string]$Dir) {
     return @{ Ok = ($p.ExitCode -eq 0 -and [bool]$line); Code = $p.ExitCode; Line = $line; Last = $last }
 }
 
+# Whose art is in her pack and on what terms: its NOTICE.md says it all; here, each source's licence and
+# its Required Notice lines.
 function Show-Notices {
     $l = Join-Path $Out 'anim\lachy\LICENSE.md'
-    if (-not (Test-Path -LiteralPath $l)) { return }
-    Say "lachy's desktop art: PolyForm Noncommercial 1.0.0 (https://polyformproject.org/licenses/noncommercial/1.0.0)"
-    Select-String -LiteralPath $l -Pattern '^Required Notice:' | ForEach-Object { Say "  $($_.Line)" }
+    $m = Join-Path $Out 'anim\mochi\LICENSE'
+    $has = @($l, $m | Where-Object { Test-Path -LiteralPath $_ })
+    if (-not $has) { return }
+    Say "her desktop art was downloaded here, straight from its artists' repositories (capri-syn's repo never holds or redistributes it); their terms apply: $(Join-Path $Out 'NOTICE.md')"
+    if (Test-Path -LiteralPath $l) { Say "lachy's desktop art: PolyForm Noncommercial 1.0.0 (https://polyformproject.org/licenses/noncommercial/1.0.0)" }
+    if (Test-Path -LiteralPath $m) { Say "mochi's art: its repo's PolyForm Noncommercial 1.0.0 covers its code; the character rights its README notes cover the images" }
+    foreach ($f in $has) { Select-String -LiteralPath $f -Pattern '^Required Notice:' | ForEach-Object { Say "  $($_.Line)" } }
 }
 
 # The inputs a pack is made from: one hash over them (the same files in her installer's copy and the repo).
-function Get-Fingerprint {
+# Mochi: mochi's art in it; X2: lachy's strips at x2 too.
+function Get-Fingerprint([bool]$Mochi, [bool]$X2) {
     $tools = Join-Path $script:Root 'tools'
     $parts = @('tools\make-pack', 'tools\desktop-art.json', 'tools\capricore-outfit.json', 'packs\capri\moods.json', 'packs\capri\persona.md') | ForEach-Object { Join-Path $script:Root $_ }
     $pins = @('capricore-*.sha256', 'lachy-desktop-*.sha256')
-    if ($LocalArt) { $pins += 'mochi-desktop-*.sha256'; $parts += Join-Path $tools 'mochi_hair.py' }
+    if ($Mochi) { $pins += 'mochi-desktop-*.sha256'; $parts += Join-Path $tools 'mochi_hair.py' }
+    if ($X2) { $pins += 'lachy-x2.sha256'; $parts += Join-Path $tools 'upscale_art.py' }
     foreach ($p in $pins) { $parts += @(Get-ChildItem -LiteralPath $tools -Filter $p | ForEach-Object { $_.FullName }) }
     $s = (($parts | Sort-Object | ForEach-Object { if (Test-Path -LiteralPath $_) { "$(Split-Path -Leaf $_)=$(Get-Sha256 $_)" } else { "$(Split-Path -Leaf $_)=none" } }) -join ';')
-    $s += ";$(Get-Key 'capricore_commit');$(Get-Key 'pip_pack');$(Get-Key 'python_embed');local-art=$([int][bool]$LocalArt)"
+    $s += ";$(Get-Key 'capricore_commit');$(Get-Key 'pip_pack');$(Get-Key 'python_embed');local-art=$([int]$Mochi)"
+    if ($X2) { $s += ";x2=$($script:M['pip_upscale'])" }
     $sha = [Security.Cryptography.SHA256]::Create()
     (-join ($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($s)) | ForEach-Object { $_.ToString('x2') })).Substring(0, 16)
 }
@@ -959,8 +975,8 @@ function Get-Python {
     $want = @((Get-Key 'pip_pack') -split '\s+' | Where-Object { $_ })
     $hashes = @((Get-Key 'pip_pack_sha256') -split '\s+' | Where-Object { $_ -match '^[0-9a-f]{64}$' })
     if (-not $hashes) { Stop-Step 'installer/manifest: no pip_pack_sha256' }
-    # --with-local-art's (ranges, LOCAL PERSONAL USE ONLY): no hashes to pin, so a pip run of their own.
-    $extra = @(if ($LocalArt -and $script:M['pip_local_art']) { $script:M['pip_local_art'] -split '\s+' | Where-Object { $_ } })
+    # mochi's hair recolour's (ranges): no hashes to pin, so a pip run of their own.
+    $extra = @(if (-not $NoLocalArt -and $script:M['pip_local_art']) { $script:M['pip_local_art'] -split '\s+' | Where-Object { $_ } })
     $stampText = "$v $(Get-Key 'python_embed_sha256') $(Get-Key 'pip_wheel_sha256') $($want -join ' ') $($hashes -join ' ') $($extra -join ' ')"
     $stamp = Join-Path $dir '.capri-pack'
     if ((Test-Path -LiteralPath $py) -and (Test-Path -LiteralPath $stamp) -and ((Get-Content -Raw -LiteralPath $stamp).Trim() -eq $stampText)) {
@@ -990,7 +1006,7 @@ function Get-Python {
     $rc = Invoke-Logged $py ($pip + @('--require-hashes', '-r', $req))
     Remove-Item -Force -LiteralPath $req
     if (-not $rc -and $extra) {
-        Say "pip install $($extra -join ' ') (--with-local-art)"
+        Say "pip install $($extra -join ' ') (mochi's hair recolour)"
         $rc = Invoke-Logged $py ($pip + @('--upgrade') + $extra)
     }
     Remove-Item -Force -LiteralPath $whl
@@ -1002,6 +1018,42 @@ function Get-Python {
     Set-Content -Encoding Ascii -LiteralPath $stamp -Value $stampText
     Good "Python $v, $($want -join ' ')"
     return $py
+}
+
+# pip_upscale (torch's CPU build from PyPI, scipy) into make-pack's Python, for the x2 upscale. Never
+# fatal: $false, and her pack is built without the x2 strips.
+function Add-Torch([string]$Py) {
+    $want = @("$($script:M['pip_upscale'])" -split '\s+' | Where-Object { $_ })
+    if (-not $want) { Warn 'installer/manifest has no pip_upscale: her pack is built without the x2 upscale'; return $false }
+    $dir = Split-Path -Parent $Py
+    $stamp = Join-Path $dir '.capri-x2'
+    if ((Test-Path -LiteralPath $stamp) -and ((Get-Content -Raw -LiteralPath $stamp).Trim() -eq ($want -join ' '))) {
+        Good "$($want -join ' ') (cached)"
+        return $true
+    }
+    # pip runs from its wheel (Get-Python's, deleted once used): fetched and checked again.
+    $wheel = Get-Key 'pip_wheel'
+    $whl = Join-Path $Cache (Split-Path -Leaf ([Uri]$wheel).AbsolutePath)
+    try {
+        Get-Url $wheel $whl 'pip'
+        Test-Pin $whl (Get-Key 'pip_wheel_sha256') (Split-Path -Leaf $whl)
+    } catch {
+        Warn "couldn't fetch pip for torch ($($_.Exception.Message -replace '^step: ')): her pack is built without the x2 upscale"
+        return $false
+    }
+    # mochi's ranges again: --target replaces what it installs, numpy among them.
+    $also = @("$($script:M['pip_local_art'])" -split '\s+' | Where-Object { $_ })
+    Say "pip install $($want -join ' ') (the x2 upscale: torch's CPU build, ~175 MB)"
+    $rc = Invoke-Logged $Py (@('-X', 'utf8', "$whl\pip", 'install', '-q', '--disable-pip-version-check', '--no-cache-dir', '--no-warn-script-location',
+            '--only-binary', ':all:', '--upgrade', '--target', (Join-Path $dir 'site-packages')) + $want + $also)
+    Remove-Item -Force -LiteralPath $whl -ErrorAction SilentlyContinue
+    if ($rc) {
+        Warn "pip couldn't install $($want -join ' ') (exit $($rc): $(@($script:Last | Select-Object -Last 1))): her pack is built without the x2 upscale"
+        return $false
+    }
+    Set-Content -Encoding Ascii -LiteralPath $stamp -Value ($want -join ' ')
+    Good "$($want -join ' ')"
+    return $true
 }
 
 # CapriCore at the pinned commit, unpacked in the cache (a half-unpacked one is never used).
@@ -1059,33 +1111,69 @@ function Set-Pack([string]$New, [string]$Fingerprint, [string]$Source) {
     if (Test-Path -LiteralPath $old) { Remove-Item -Recurse -Force -LiteralPath $old }
 }
 
+# The pack there was built from these inputs (its marker says so) and still checks: left as it is.
+function Test-Built([string]$Fingerprint) {
+    $mark = Join-Path $Out $script:Marker
+    if (-not ((Test-Path -LiteralPath (Join-Path $Out 'sprites.json')) -and (Test-Path -LiteralPath $mark) -and
+            (Select-String -LiteralPath $mark -SimpleMatch "fingerprint=$Fingerprint" -Quiet))) { return $false }
+    if ($Exe) {
+        $c = Test-Pack $Out
+        if (-not $c.Ok) { return $false }
+        Good "$($c.Line) (--check)"
+    }
+    Good "up to date ($Out)"
+    Show-Notices
+    Result 'pack: ok'
+    return $true
+}
+
 function Build-Pack {
     Resolve-Her
+    # mochi's art unless -NoLocalArt; lachy's strips at x2 with -Upscale, or as the manifest says.
+    # A pack built without mochi's (before it was the default) is built again with it.
+    $mochi = -not $NoLocalArt
+    $x2 = if ($Upscale) { $true } elseif ($NoUpscale) { $false } else { $script:M['pack_upscale'] -eq 'on' }
+    if ($x2 -and -not (Test-Path -LiteralPath (Join-Path $script:Root 'tools\upscale_art.py'))) {
+        Warn "the x2 upscale: no tools\upscale_art.py beside these steps (an older copy), so her pack is built without it"
+        $x2 = $false
+    }
     if ($DryRun) {
-        Say "`$ make-pack CapriCore@$((Get-Key 'capricore_commit').Substring(0, 7)) $Out --lachy auto$(if ($LocalArt) { ' --mochi auto' }), in CPython $(Get-Key 'python_embed') (embeddable) with $(Get-Key 'pip_pack')"
+        $pips = @((Get-Key 'pip_pack')) + @(if ($mochi) { $script:M['pip_local_art'] }) + @(if ($x2) { $script:M['pip_upscale'] })
+        Say "`$ make-pack CapriCore@$((Get-Key 'capricore_commit').Substring(0, 7)) $Out --lachy auto$(if ($mochi) { ' --mochi auto' })$(if ($x2) { ' --upscale' }), in CPython $(Get-Key 'python_embed') (embeddable) with $($pips -join ' ')"
         Result 'pack: dry-run'
         return
     }
-    $fp = Get-Fingerprint
-    $mark = Join-Path $Out $script:Marker
-    if ((Test-Path -LiteralPath (Join-Path $Out 'sprites.json')) -and (Test-Path -LiteralPath $mark) -and (Select-String -LiteralPath $mark -SimpleMatch "fingerprint=$fp" -Quiet)) {
-        $ok = $true
-        if ($Exe) { $c = Test-Pack $Out; $ok = $c.Ok; if ($ok) { Good "$($c.Line) (--check)" } }
-        if ($ok) { Good "up to date ($Out)"; Show-Notices; Result 'pack: ok'; return }
-    }
+    if (Test-Built (Get-Fingerprint $mochi $x2)) { return }
     New-Item -ItemType Directory -Force $Cache | Out-Null
     $py = Get-Python
+    if ($x2 -and -not (Add-Torch $py)) {
+        $x2 = $false
+        if (Test-Built (Get-Fingerprint $mochi $x2)) { return }
+    }
     $cc = Get-CapriCore
     $new = "$Out.new"
-    if (Test-Path -LiteralPath $new) { Remove-Item -Recurse -Force -LiteralPath $new }
     New-Item -ItemType Directory -Force (Split-Path -Parent $Out) | Out-Null
-    $side = @('--lachy', 'auto')
-    if ($LocalArt) { $side += @('--mochi', 'auto') }
-    Say "building her pack: CapriCore $((Get-Key 'capricore_commit').Substring(0, 7)) and lachy's desktop art, every file checked against its pin"
-    # make-pack's download cache (lachy's files) in the cache too.
+    Say "building her pack: CapriCore $((Get-Key 'capricore_commit').Substring(0, 7)) and lachy's desktop art$(if ($mochi) { ", mochi's art (her intro close-ups and face cut-ins)" }), every file checked against its pin"
+    if ($x2) { Say "and lachy's strips at x2: Real-ESRGAN on the CPU, 4 threads, about 45 min" }
+    # make-pack's download cache (lachy's and mochi's files, the upscale's model) in the cache too.
+    # The full pack first; the extras never fail the step: a failed upscale is built again without the
+    # x2 strips, then a failure of mochi's art without it. CapriCore + lachy failing does.
     $env:XDG_CACHE_HOME = Join-Path $Cache 'xdg'
-    try { $rc = Invoke-Logged $py (@('-X', 'utf8', '-u', (Join-Path $script:Root 'tools\make-pack'), $cc, $new) + $side) }
-    finally { Remove-Item Env:\XDG_CACHE_HOME -ErrorAction SilentlyContinue }
+    try {
+        while ($true) {
+            if (Test-Path -LiteralPath $new) { Remove-Item -Recurse -Force -LiteralPath $new }
+            $side = @('--lachy', 'auto')
+            if ($mochi) { $side += @('--mochi', 'auto') }
+            if ($x2) { $side += '--upscale' }
+            $rc = Invoke-Logged $py (@('-X', 'utf8', '-u', (Join-Path $script:Root 'tools\make-pack'), $cc, $new) + $side)
+            if (-not $rc) { break }
+            $why = "$(@($script:Last | Where-Object { $_ -like 'make-pack:*' } | Select-Object -Last 1))"
+            if (-not $why) { $why = "$(@($script:Last | Select-Object -Last 1))" }
+            if ($x2) { Warn "the x2 upscale didn't work ($why): her pack is built without it"; $x2 = $false; continue }
+            if ($mochi -and $why -match '--mochi|README has no') { Warn "mochi's art couldn't be added ($why): her pack is built without it"; $mochi = $false; continue }
+            break
+        }
+    } finally { Remove-Item Env:\XDG_CACHE_HOME -ErrorAction SilentlyContinue }
     if ($rc) {
         Remove-Item -Recurse -Force -LiteralPath $new -ErrorAction SilentlyContinue
         $l = @($script:Last | Where-Object { $_ -like 'make-pack:*' } | Select-Object -Last 1)
@@ -1094,7 +1182,7 @@ function Build-Pack {
             Remove-Item -Recurse -Force -LiteralPath $cc
             Stop-Step "CapriCore's files don't match their pins (tools/capricore-*.sha256), so none of it was used. That download is deleted: try again"
         }
-        if ($l -match 'cannot download|no checksum-matching pose-sleep|CapriCore v1.2.2 file') { Stop-Step "couldn't download lachy's desktop art or CapriCore's newer frames from GitHub. Is this PC offline? ($l)" }
+        if ($l -match 'cannot download|no checksum-matching pose-sleep|CapriCore v1.2.2 file') { Stop-Step "couldn't download her desktop art or CapriCore's newer frames from GitHub. Is this PC offline? ($l)" }
         if ($l -match 'does not match|is not lachydotmcg') { Stop-Step "a file of lachy's desktop art doesn't match its pin (tools/lachy-desktop-*.sha256), so none of it was used ($l)" }
         Stop-Step "make-pack couldn't build her pack (exit $rc): $l"
     }
@@ -1106,7 +1194,7 @@ function Build-Pack {
         }
         Good "$($c.Line) (--check)"
     }
-    Set-Pack $new $fp 'download'
+    Set-Pack $new (Get-Fingerprint $mochi $x2) 'download'
     Good "her pack: $Out"
     Show-Notices
     if (-not $KeepCache) {

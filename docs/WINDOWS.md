@@ -131,15 +131,20 @@ cargo-about, `installer/licenses/`).
   or the key service's default from her own table (`steps.ps1 model`, through `synaps-avatar --set
   session.model=…`). An account's model is set only once he's signed in (the finish page's `login
   model`); unticked, stopped or failed, it stays unset and she reads NO BRAIN YET.
-- **Her pack** (page "Her pack"): "Download her art (CapriCore + lachy's desktop art, ~120 MB)", the
-  default; "Use a pack folder I already have" (copied; a folder without `sprites.json` is refused);
-  or "Skip, I'll add one later". The download is the one install.ps1 does: CPython's embeddable
-  package and pip (pinned, SHA-256 checked) in a cache folder, fonttools into it, CapriCore at
-  `capricore_commit` from codeload, then `tools/make-pack --lachy auto`, every file checked against
-  `tools/*.sha256`, and her `--check` on the result. Nothing of his is used or changed: not his
-  Python, not his PATH. lachy's PolyForm Noncommercial notices (`Required Notice:` lines) are shown
-  on the finish page. Her art is never in the installer, and never mochi's (`--with-local-art` is
-  install.ps1's alone).
+- **Her pack** (page "Her pack"): "Download her art (CapriCore, lachy's and mochi's desktop art,
+  ~150 MB)", the default, with two boxes under it: "mochi's art: her intro close-ups and face
+  cut-ins" (ticked) and "lachy's strips at x2, sharper" (unticked: `pack_upscale` in the manifest;
+  torch's CPU build, ~175 MB more, then about 45 min of CPU); "Use a pack folder I already have"
+  (copied; a folder without `sprites.json` is refused); or "Skip, I'll add one later". The download is
+  the one install.ps1 does: CPython's embeddable package and pip (pinned, SHA-256 checked) in a cache
+  folder, fonttools, numpy and Pillow into it, CapriCore at `capricore_commit` from codeload, then
+  `tools/make-pack --lachy auto --mochi auto` (`steps.ps1 pack`; `-NoLocalArt` without mochi's,
+  `-Upscale` with the x2 strips), every file checked against `tools/*.sha256`, and her `--check` on
+  the result. The extras never fail the step: a failed upscale is built again without the x2 strips,
+  and mochi's art that can't be fetched is left out, each said in the log. Nothing of his is used or
+  changed: not his Python, not his PATH. lachy's and mochi's notices (licence, `Required Notice:`
+  lines) are shown on the finish page. Her art is never in the installer: it comes straight from its
+  artists' repositories onto his PC, and their terms apply (the pack's `NOTICE.md`).
 - **Upgrades:** a pack the steps made (it holds `.capri-syn-pack`) is replaced whole, or left as it
   is when it was built from the same inputs; any other pack (his) is moved to
   `capri.pre-install-<date>`, never deleted.
@@ -231,7 +236,8 @@ Unattended:
 
 ```
 capri-syn-setup-….exe /VERYSILENT /SUPPRESSMSGBOXES [/SYNAPS=install|skip]
-                      [/PACK=download|skip|"C:\packs\capri"] [/VOICE=on|off] [/MIC="name"]
+                      [/PACK=download|skip|"C:\packs\capri"] [/LOCALART=on|off] [/UPSCALE=on|off]
+                      [/VOICE=on|off] [/MIC="name"]
                       [/VOICEFROM="C:\...\capri-syn-voice-setup.exe" or a URL] [/TASKS=autostart]
                       [/BRAIN=later|local|local:MODEL|ACCOUNT]
 ```
@@ -241,7 +247,9 @@ capri-syn-setup-….exe /VERYSILENT /SUPPRESSMSGBOXES [/SYNAPS=install|skip]
 setup log has the `steps.ps1 login model` line: her model is set once he has), and a key can't be
 given unattended. Without it, later.
 
-The defaults are the wizard's: Synaps if it's needed, her art downloaded, autostart, her voice when
+`/LOCALART=off` downloads her art without mochi's; `/UPSCALE=on` with lachy's strips at x2.
+
+The defaults are the wizard's: Synaps if it's needed, her art downloaded (mochi's too), autostart, her voice when
 Windows has a microphone and there's a voice to install (a first install only: see Upgrades above).
 Her voice comes from `/VOICEFROM` (a path, or an `https://` URL; a `.sha256` beside it is checked),
 else the `capri-syn-voice-setup-x86_64.exe` of her own release, `v<the setup's version>` (never
@@ -275,8 +283,9 @@ CI:
   holds the sign-in page check to its cases (another host, path or provider, `user@`, a port, `\`,
   a Google redirect).
 - `windows-setup-e2e` (`test-setup-e2e.ps1`, a clean runner): the defaults, unattended; `synaps
-  --version`, the daemon (protocol 3, and its Run value), her pack, autostart, the Start menu; she
-  starts, attaches (her control socket's `state`: `session.live`, the tag not OFFLINE), and answers
+  --version`, the daemon (protocol 3, and its Run value), her pack (mochi's art in it, its NOTICE
+  section and Required Notice line; no x2 strips), autostart, the Start menu; she (mochi's images taken
+  out first: the shots are public) starts, attaches (her control socket's `state`: `session.live`, the tag not OFFLINE), and answers
   for 60 s of clicks on her (every `state` from her UI thread, `WM_NULL` to her windows, her ticks,
   no Application Hang event); no microphone, so no voice files; the uninstall leaves nothing of hers.
 - `windows-setup-voice` (`test-setup-voice.ps1`, a clean runner): `/VOICE=on`, `/VOICEFROM=` the
@@ -286,7 +295,7 @@ CI:
   his settings byte for byte; and an uninstall that leaves no voice.
 - `windows-setup-wizard` (`test-setup-wizard.ps1`, a clean runner): the wizard clicked through with
   its defaults (UI Automation; the runner is elevated, so first the administrator question, Yes) but
-  her model: "Choose later" picked as it opens, then "Sign in to an account", ChatGPT; a screenshot
+  `/LOCALART=off` (its shots are public) and her model: "Choose later" picked as it opens, then "Sign in to an account", ChatGPT; a screenshot
   of every page (`tools/shoot-win.ps1`); her model unset at install, Finish starting `login model`
   and its sign-in (stopped there: CI can't sign in; her model still unset), her on the desktop after
   "Start her now". Then Setup again,
@@ -377,6 +386,8 @@ job built (`installer/test-windows.ps1`):
 - `--yes --no-autostart`;
 - `synaps --version`, her `--check`, the daemon and its Run value;
 - a rerun (up to date);
+- `--no-local-art` (built again, without mochi's art), then the defaults again (built again, the full
+  pack: the upgrade of a pack made before mochi's art was the default);
 - `--uninstall`, which leaves nothing of hers.
 
 What CI can't show is item 15 below.
@@ -439,7 +450,8 @@ desktop to try it on.
 `.github/workflows/shots.yml` shoots her on a GitHub Windows runner: Actions → shots → Run workflow
 (a ref and the scene sets), or the `shots` label on a PR (its head; `shots:settings` or
 `shots:header` for one set). It builds the release binary of that ref, assembles her pack with
-`tools/make-pack` (CapriCore v1.0.4 + lachy, `--lachy auto`; never mochi), starts the fake daemon
+`tools/make-pack` (CapriCore v1.0.4 + lachy, `--lachy auto`; never mochi: CI's shots are public,
+and its images aren't covered by its licence), starts the fake daemon
 (`tools/fakedaemon.py`: the daemon's named pipe, its control on 127.0.0.1:47811) and, for voice
 takes, the fake sidecar (`tools/fakevoice.py`, on the real link), then runs `tools/shots/scenes.ps1`
 at 1920x1080 and 100%, and a few takes again at 150%. She is driven through her control socket;

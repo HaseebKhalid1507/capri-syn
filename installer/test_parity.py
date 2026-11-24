@@ -36,8 +36,41 @@ class Parity(unittest.TestCase):
         sh = flags(block(SH, "usage: install.sh", "EOF"))
         ps = flags(block(PS, "usage: install.ps1", "'@"))
         self.assertEqual(sh, ps)
-        self.assertEqual(sh, ["--allow-root", "--artifact", "--brain", "--dry-run", "--from-source", "--no-autostart", "--prefix",
-                              "--purge", "--uninstall", "--voice", "--watch", "--with-local-art", "--yes"])
+        self.assertEqual(sh, ["--allow-root", "--artifact", "--brain", "--dry-run", "--from-source", "--no-autostart",
+                              "--no-local-art", "--no-upscale", "--prefix", "--purge", "--uninstall", "--upscale", "--voice",
+                              "--watch", "--with-local-art", "--yes"])
+
+    def test_the_full_pack_is_the_default(self):
+        # mochi's art on every install path unless asked not to (--with-local-art, its old opt-in, a no-op);
+        # lachy's x2 strips as the manifest's pack_upscale says, which each usage and her installer's box say too.
+        steps = STEPS.read_text(encoding="utf-8")
+        iss = (ROOT / "packaging/windows/synaps-avatar.iss").read_text(encoding="utf-8")
+        sh_args = block(SH, "args() {", "\n}\n")
+        self.assertRegex(sh_args, r"\bLOCAL_ART=1 UPSCALE=''")
+        self.assertIn("--with-local-art) LOCAL_ART=1", sh_args)
+        self.assertIn("--no-local-art) LOCAL_ART=0", sh_args)
+        self.assertIn("$script:LocalArt = $true; $script:Upscale = ''", block(PS, "function Read-Flags", "\n}\n"))
+        self.assertIn("$mochi = -not $NoLocalArt", block(steps, "function Build-Pack", "\n}\n"))
+        self.assertIn("MochiBox.Checked := not ParamOff('LOCALART');", iss)
+        up = re.search(r"^pack_upscale=(on|off)$", MANIFEST, re.M).group(1)
+        for name, usage in (("install.sh", block(SH, "usage: install.sh", "EOF")), ("install.ps1", block(PS, "usage: install.ps1", "'@"))):
+            self.assertIn(f"(the default: {up})", usage, f"{name}'s usage says the x2 default the manifest does")
+        self.assertIn("UpscaleBox.Checked := " + ("not ParamOff('UPSCALE');" if up == "on" else "ParamOn('UPSCALE');"), iss,
+                      "her installer's x2 box starts as the manifest's pack_upscale")
+        for name, text in (("install.sh", SH), ("install.ps1", PS), ("steps.ps1", steps), ("synaps-avatar.iss", iss),
+                           ("make-pack", (ROOT / "tools/make-pack").read_text())):
+            self.assertNotIn("PERSONAL USE ONLY", text, f"{name}: the art's terms are its artists' (NOTICE.md), not a warning of ours")
+
+    def test_the_installers_carry_what_make_pack_reads(self):
+        # Every pin and helper make-pack reads for the full pack, in the Linux layout and her Windows installer.
+        stage = (ROOT / "installer/stage.sh").read_text()
+        iss = (ROOT / "packaging/windows/synaps-avatar.iss").read_text(encoding="utf-8")
+        for f in ("mochi_hair.py", "upscale_art.py"):
+            self.assertIn(f'"$src/tools/{f}"', stage)
+        self.assertIn('"$src"/tools/*.sha256', stage)
+        for f in ("make-pack", "capricore-*.sha256", "lachy-desktop-*.sha256", "mochi-desktop-*.sha256", "lachy-x2.sha256",
+                  "mochi_hair.py", "upscale_art.py", "desktop-art.json", "capricore-outfit.json"):
+            self.assertTrue(f'Source: "..\\..\\tools\\{f}"; DestDir: "{{app}}\\steps\\tools"' in iss, f"her installer has no tools\\{f}")
 
     def test_every_flag_is_parsed(self):
         sh_args = block(SH, "args() {", "\n}\n")
