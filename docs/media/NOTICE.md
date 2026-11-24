@@ -8,6 +8,8 @@ no licence of any kind for them. The art in them belongs to its owners, as set o
 Rights holders: open an issue and it comes down.
 
 They were shot with a pack built by `tools/make-pack` from the two sources below, and nothing else.
+Shoot new ones with a `--no-local-art` pack (as CI's are): mochi's art, the installers' default, is
+not one of those sources.
 The art files themselves are not in this repository: `make-pack` assembles them on your machine.
 The one other image in them is her app icon, in the notification area of `still-tray.png` and
 `still-tray-tooltip.png`: a crop of Capri's face from a frame of Cyberpunk: Edgerunners 2, with a

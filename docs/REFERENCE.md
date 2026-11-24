@@ -536,10 +536,10 @@ Optional desktop art, into the pack's `anim/` (a pack without it loads as before
   `tools/lachy-desktop-156ed18.sha256`. `auto` downloads exactly those files at that commit (cached).
 - `--mochi DIR|auto`: [mochiiwuff/capri-desktop](https://github.com/mochiiwuff/capri-desktop) at `c011764`,
   checked against `tools/mochi-desktop-c011764.sha256`. Its images are show frames, a fan-made cut-out and
-  fan art: its licence (PolyForm Noncommercial 1.0.0) covers its code, not them, and its README's
-  "Credits and rights" notes whose they are (`NOTICE.md` quotes it, with its Required Notice line). They
-  go into your local pack directory, downloaded from that repository; this repo never contains or
-  redistributes them. The installers pass it by default (`--no-local-art` doesn't). They give her the
+  fan art; its code is under PolyForm Noncommercial 1.0.0, and its README's "Credits and rights" speaks
+  for the images (`NOTICE.md` quotes it, with its Required Notice line). They
+  go into your local pack directory, downloaded from that repository; the art files are not in this
+  repository. The installers pass it by default (`--no-local-art` doesn't). They give her the
   launch close-up (below), the cut-ins and the Line's faces.
 - `--mochi-hair red|flat|original` (default `red`): those close-ups draw her hair black; make-pack repaints it
   as it copies them (`tools/mochi_hair.py`: a measured head region minus her face, times the black ink;

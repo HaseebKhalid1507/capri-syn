@@ -140,11 +140,15 @@ cargo-about, `installer/licenses/`).
   folder, fonttools, numpy and Pillow into it, CapriCore at `capricore_commit` from codeload, then
   `tools/make-pack --lachy auto --mochi auto` (`steps.ps1 pack`; `-NoLocalArt` without mochi's,
   `-Upscale` with the x2 strips), every file checked against `tools/*.sha256`, and her `--check` on
-  the result. The extras never fail the step: a failed upscale is built again without the x2 strips,
-  and mochi's art that can't be fetched is left out, each said in the log. Nothing of his is used or
+  the result, before it replaces the pack there. The extras never fail the step: without numpy and
+  Pillow mochi's close-ups keep her hair as drawn; anything failing with mochi's art is built again
+  without it; a failed upscale leaves the pack without the x2 strips; each is said in the log. A rerun
+  starts as the last download was asked (the pack's `.capri-syn-pack`, `choice=`: its boxes, and
+  `steps.ps1 pack` without a switch). Nothing of his is used or
   changed: not his Python, not his PATH. lachy's and mochi's notices (licence, `Required Notice:`
-  lines) are shown on the finish page. Her art is never in the installer: it comes straight from its
-  artists' repositories onto his PC, and their terms apply (the pack's `NOTICE.md`).
+  lines) are shown on the finish page. Her art is never in the installer: it's downloaded onto his
+  PC from the repositories that publish it (lachydotmcg/capri-desktop, mochiiwuff/capri-desktop); the
+  art files are not in capri-syn's repository, and its terms are in the pack's `NOTICE.md`.
 - **Upgrades:** a pack the steps made (it holds `.capri-syn-pack`) is replaced whole, or left as it
   is when it was built from the same inputs; any other pack (his) is moved to
   `capri.pre-install-<date>`, never deleted.
@@ -247,7 +251,7 @@ capri-syn-setup-….exe /VERYSILENT /SUPPRESSMSGBOXES [/SYNAPS=install|skip]
 setup log has the `steps.ps1 login model` line: her model is set once he has), and a key can't be
 given unattended. Without it, later.
 
-`/LOCALART=off` downloads her art without mochi's; `/UPSCALE=on` with lachy's strips at x2.
+`/LOCALART=off` (or `0`, `no`, `false`) downloads her art without mochi's; `/UPSCALE=on` (or `1`, `yes`, `true`) with lachy's strips at x2.
 
 The defaults are the wizard's: Synaps if it's needed, her art downloaded (mochi's too), autostart, her voice when
 Windows has a microphone and there's a voice to install (a first install only: see Upgrades above).

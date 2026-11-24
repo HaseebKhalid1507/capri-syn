@@ -46,10 +46,12 @@ usage: install.ps1 [--yes] [--dry-run] [--uninstall [--purge]] [--voice] [--watc
   --no-autostart    don't start her at sign-in (she still starts now, at the end)
   --from-source     build her from source even when a release has an installer
   --prefix DIR      where she goes (default %LOCALAPPDATA%\Programs\synaps-avatar)
-  --no-local-art    leave mochi's art out of her pack (her intro close-ups and face cut-ins);
-                    --with-local-art, its old opt-in, is still accepted and changes nothing
+  --no-local-art    leave mochi's art out of her pack (her intro close-ups and face cut-ins); a
+                    rerun keeps it out until --with-local-art (its old opt-in; mochi's art is the
+                    default now)
   --upscale         also lachy's strips at x2 (Real-ESRGAN on the CPU through torch: ~175 MB more
-                    to download, ~45 min of CPU); if it fails, her pack is built without them
+                    to download, ~45 min of CPU); if it fails, her pack is built without them. A
+                    rerun keeps them until --no-upscale
   --no-upscale      not those (the default: off)
   --artifact FILE   install this release asset (her setup .exe) instead of downloading one
   --allow-root      install.sh's (installing as root); nothing to allow here
@@ -230,7 +232,7 @@ function Set-RunValue([string]$Name, [string]$Value) {
 function Read-Flags([string[]]$ArgList) {
     $script:Yes = $false; $script:Dry = $false; $script:Uninstall = $false; $script:Purge = $false
     $script:Voice = $false; $script:Watch = $false; $script:Autostart = $true; $script:FromSource = $false
-    $script:LocalArt = $true; $script:Upscale = ''; $script:Prefix = Join-Path $env:LOCALAPPDATA 'Programs\synaps-avatar'; $script:Artifact = ''; $script:PrefixGiven = $false
+    $script:LocalArt = ''; $script:Upscale = ''; $script:Prefix = Join-Path $env:LOCALAPPDATA 'Programs\synaps-avatar'; $script:Artifact = ''; $script:PrefixGiven = $false
     $script:HisRun = ''; $script:StoppedElsewhere = $false; $script:BrainPick = ''
     $i = 0
     while ($ArgList -and $i -lt $ArgList.Count) {
@@ -247,8 +249,8 @@ function Read-Flags([string[]]$ArgList) {
             'watch' { $script:Watch = $true }
             'noautostart' { $script:Autostart = $false }
             'fromsource' { $script:FromSource = $true }
-            'withlocalart' { $script:LocalArt = $true }
-            'nolocalart' { $script:LocalArt = $false }
+            'withlocalart' { $script:LocalArt = 'on' }
+            'nolocalart' { $script:LocalArt = 'off' }
             'upscale' { $script:Upscale = 'on' }
             'noupscale' { $script:Upscale = 'off' }
             'allowroot' { }
@@ -722,12 +724,16 @@ function Install-Pack {
     $src = Get-Source $(if ($script:ReleaseTag) { $script:ReleaseTag } else { $script:Ref })
     $steps = Join-Path $src 'packaging\windows\steps.ps1'
     $a = @('pack', '-Out', $script:Pack, '-Cache', $script:Cache, '-Exe', $script:Exe, '-KeepCache')
-    # mochi's art is on by default. Steps from before that (1.2.0's) take -LocalArt for it, and have no
-    # -NoLocalArt or x2 upscale.
+    # mochi's art is on by default, and without a flag the steps do as the last run was asked. Steps
+    # from before that (1.2.0's) take -LocalArt for it, and have no -NoLocalArt or x2 upscale.
     $now = (Test-Path -LiteralPath $steps) -and (Select-String -LiteralPath $steps -SimpleMatch '[switch]$NoLocalArt' -Quiet)
-    if ($script:LocalArt) { $a += '-LocalArt' } elseif ($now) { $a += '-NoLocalArt' }
-    if ($script:Upscale -and $now) { $a += $(if ($script:Upscale -eq 'on') { '-Upscale' } else { '-NoUpscale' }) }
-    elseif ($script:Upscale -eq 'on') { Write-Warn "--upscale: her release's install steps have no x2 upscale yet (the next one does), so her pack is built without it" }
+    if ($now) {
+        if ($script:LocalArt) { $a += $(if ($script:LocalArt -eq 'on') { '-LocalArt' } else { '-NoLocalArt' }) }
+        if ($script:Upscale) { $a += $(if ($script:Upscale -eq 'on') { '-Upscale' } else { '-NoUpscale' }) }
+    } else {
+        if ($script:LocalArt -ne 'off') { $a += '-LocalArt' }
+        if ($script:Upscale -eq 'on') { Write-Warn "--upscale: her release's install steps have no x2 upscale yet (the next one does), so her pack is built without it" }
+    }
     # Made by this script before the steps marked their packs: still its own.
     if (Test-Recorded 'dir' $script:Pack) { $a += '-Ours' }
     if ($script:Dry) {
@@ -1027,7 +1033,7 @@ function Write-SynapsStays([string]$Mine, [string]$PathEdit, [string]$Rustup) {
 
 # What her pack holds, for the summary: as built (a dry run: as asked).
 function Get-PackHow {
-    $mochi = $script:LocalArt
+    $mochi = $script:LocalArt -ne 'off'
     $x2 = $script:Upscale -eq 'on' -or (-not $script:Upscale -and $script:M.pack_upscale -eq 'on')
     if (-not $script:Dry -and (Test-Path -LiteralPath (Join-Path $script:Pack 'sprites.json'))) {
         $mochi = Test-Path -LiteralPath (Join-Path $script:Pack 'anim\mochi')

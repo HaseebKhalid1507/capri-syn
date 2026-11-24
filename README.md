@@ -13,8 +13,8 @@
 > it's borrowed from other Capri projects, [CapriCore](https://github.com/CapriChooms/CapriCore) (her
 > sprites), [Capri](https://github.com/lachydotmcg/capri-desktop) by lachydotmcg (her animations) and
 > [mochiiwuff/capri-desktop](https://github.com/mochiiwuff/capri-desktop) (her intro close-ups and face
-> cut-ins), which the installers download onto your machine straight from those repositories (none of it
-> is in this one); her app icon is a frame from the show. Credits and terms: [Credits & legal](#credits--legal).
+> cut-ins), which the installers download onto your machine from the repositories that publish it (the
+> art files are not in this one); her app icon is a frame from the show. Credits and terms: [Credits & legal](#credits--legal).
 
 <p align="center">
   <img alt="Linux: X11 and Wayland" src="https://img.shields.io/badge/linux-X11%20%C2%B7%20Wayland-ff1438?style=flat-square&labelColor=0a0a0b">
@@ -496,12 +496,17 @@ machine needs a look): [docs/WATCH.md](docs/WATCH.md).
   >
   > Required Notice: Anyone who uses Capri's code, art, animations or any of its other assets must credit the Capri project (https://github.com/lachydotmcg/capri-desktop). Capri's art and animations are by her artist, who prefers to stay private. Parts made by others keep their own licences, listed in its README.
 - **Intro close-ups and face cut-ins.** Her launch close-up, the cut-ins and the faces in the Line come
-  from [mochiiwuff/capri-desktop](https://github.com/mochiiwuff/capri-desktop): frames of the show, a
-  fan-made cut-out and fan art. Its licence (PolyForm Noncommercial 1.0.0) covers its code, not these
-  images; its README's "Credits and rights" notes whose they are (CD PROJEKT RED, Studio Trigger and
-  Netflix). They are not in this repository either: the installers download them onto your machine from
-  that repository (`tools/make-pack --mochi`; `--no-local-art` leaves them out), and the pack's
-  `NOTICE.md` quotes its rights statement.
+  from [mochiiwuff/capri-desktop](https://github.com/mochiiwuff/capri-desktop). Its code is under the
+  PolyForm Noncommercial License 1.0.0; of its images, its README's "Credits and rights" says:
+
+  > Capri / Project Capricorn, Cyberpunk and Cyberpunk: Edgerunners belong to CD PROJEKT RED, Studio Trigger and Netflix.
+  > This is a non-commercial fan project with no affiliation. The character images in `assets/capri/` come from frames of
+  > the show, a fan-made cut-out and fan art (her intro's close-ups); they are **not** covered by the code's license.
+  > If a rights holder wants them removed, open an issue.
+
+  The art files are not in this repository: the installers download them onto your machine from that
+  repository (`tools/make-pack --mochi`; `--no-local-art` leaves them out), and the pack's `NOTICE.md`
+  quotes the same paragraph.
 
   > Required Notice: Copyright (c) 2026 mochiiwuff (https://github.com/mochiiwuff/capri-desktop)
 - **Unofficial.** This is a fan project. It is not affiliated with or endorsed by CD PROJEKT RED,

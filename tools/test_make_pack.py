@@ -317,8 +317,9 @@ class DesktopArt(SidesBase):
         self.assertIn("> The rights paragraph, over two lines.\n", n, "its rights statement, read from its README")
         self.assertNotIn("not part of it", n)
         self.assertNotIn("PERSONAL USE", n, "no personal-use-only warning: the rights are its README's, quoted")
-        self.assertIn("never contains or redistributes them", n)
-        self.assertIn("covers its code only, not these images", n)
+        self.assertIn("the art files are not in capri-syn's repository", n)
+        self.assertNotIn("redistribut", n, "what's true: the files aren't in the repo, said no wider")
+        self.assertIn('On these images, its README, "Credits and rights":\n\n> ', n, "the README's words, not ours")
 
     def test_mochi_hair_flat_and_original(self):
         d = str(self.sides["mochi"].dir)

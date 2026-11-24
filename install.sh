@@ -33,10 +33,12 @@ usage: install.sh [--yes] [--dry-run] [--uninstall [--purge]] [--voice] [--watch
   --no-autostart    don't start her at login (she still starts now, at the end)
   --from-source     build her from source even when a release has a binary
   --prefix DIR      where bin/ and lib/synaps-avatar/ go (default ~/.local)
-  --no-local-art    leave mochi's art out of her pack (her intro close-ups and face cut-ins);
-                    --with-local-art, its old opt-in, is still accepted and changes nothing
+  --no-local-art    leave mochi's art out of her pack (her intro close-ups and face cut-ins); a
+                    rerun keeps it out until --with-local-art (its old opt-in; mochi's art is the
+                    default now)
   --upscale         also lachy's strips at x2 (Real-ESRGAN on the CPU through torch: ~255 MB more
-                    to download, ~45 min of CPU); if it fails, her pack is built without them
+                    to download, ~45 min of CPU); if it fails, her pack is built without them. A
+                    rerun keeps them until --no-upscale
   --no-upscale      not those (the default: off)
   --artifact FILE   install this release asset (the Linux tarball) instead of downloading one
   --allow-root      install her for root (as root, with root's own HOME); otherwise root is refused
@@ -352,7 +354,7 @@ block_write() {
 # ---- setup ------------------------------------------------------------------------------------
 
 args() {
-    YES=0 DRY=0 UNINSTALL=0 PURGE=0 VOICE=0 WATCH=0 AUTOSTART=1 FROM_SOURCE=0 LOCAL_ART=1 UPSCALE='' ALLOW_ROOT=0
+    YES=0 DRY=0 UNINSTALL=0 PURGE=0 VOICE=0 WATCH=0 AUTOSTART=1 FROM_SOURCE=0 LOCAL_ART='' UPSCALE='' ALLOW_ROOT=0
     PREFIX=$HOME/.local ARTIFACT='' PREFIX_GIVEN=0 BRAIN_PICK='' TTYIN=/dev/tty TTYOUT=/dev/tty TTYFD=''
     while [ $# -gt 0 ]; do
         case $1 in
@@ -851,52 +853,78 @@ step_pack() {
         [ "$DRY" = 1 ] || die "python3 is needed for her pack (install it, then run this again)"
         info "(python3: from the system packages above)"
     fi
-    # make-pack's dependencies in the installer's own venv.
-    if [ ! -x "$VENV/bin/python" ]; then
-        mkdir_rec "$CACHE"
-        run python3 -m venv "$VENV"
-    fi
-    local -a want extra
-    read -r -a want <<<"$M_pip_pack"
-    if [ "$LOCAL_ART" = 1 ]; then
-        read -r -a extra <<<"${M_pip_local_art:-}"
-        want+=("${extra[@]}")
-    fi
-    if [ "$(cat "$VENV/.capri-pip" 2>/dev/null)" = "${want[*]}" ]; then
-        good "make-pack's Python: ${want[*]} (venv $(tilde "$VENV"))"
-    else
-        run "$VENV/bin/python" -m pip install -q --disable-pip-version-check --no-cache-dir "${want[@]}"
-        [ "$DRY" = 1 ] || printf '%s\n' "${want[*]}" >"$VENV/.capri-pip"
-    fi
-    # lachy's strips at x2 (--upscale, or the manifest's pack_upscale): torch's CPU build in the same
-    # venv. Never fatal: without torch, or its release's make-pack without tools/upscale_art.py, or a
-    # failed upscale, her pack is built without them.
-    local x2=${UPSCALE:-}
-    if [ -z "$x2" ]; then
+    # What make-pack reads: a pack built from other files (a new release) is built again.
+    local base
+    base=$({ cat "$LIB/tools/make-pack" "$LIB"/tools/*.sha256 "$LIB/tools/desktop-art.json" "$LIB/tools/capricore-outfit.json" "$LIB/packs/capri/moods.json" \
+        "$LIB/packs/capri/persona.md" "$LIB/tools/mochi_hair.py" "$LIB/tools/upscale_art.py" 2>/dev/null || true; } | sha256sum | cut -c1-16)
+    # mochi's art and the x2 strips: as the flags say, else as they said last time (the receipt's
+    # pack_choice: only what was asked for), else the defaults (mochi's art on; x2 as the manifest's
+    # pack_upscale says).
+    local pick pm='' px='' mochi x2 chose
+    pick=$(meta pack_choice)
+    case " $pick " in *" mochi=0 "*) pm=0 ;; *" mochi=1 "*) pm=1 ;; esac
+    case " $pick " in *" x2=0 "*) px=0 ;; *" x2=1 "*) px=1 ;; esac
+    [ -n "$LOCAL_ART" ] || [ "$pm" != 0 ] || info "without mochi's art, as asked last time (--with-local-art adds it)"
+    [ -n "$UPSCALE" ] || [ "$px" != 1 ] || info "with lachy's strips at x2, as asked last time (--no-upscale leaves them out)"
+    pm=${LOCAL_ART:-$pm} px=${UPSCALE:-$px}
+    chose="mochi=${pm:--} x2=${px:--}"
+    mochi=${pm:-1}
+    x2=${px:-0}
+    [ -n "$px" ] || [ "${M_pack_upscale:-off}" != on ] || x2=1
+    # The x2 upscale failed on these same files last time (another CPU or torch than its pins'): not
+    # again unless asked (--upscale), it's ~45 min.
+    if [ "$x2" = 1 ] && [ -z "$UPSCALE" ] && [ "$(meta pack_x2_failed)" = "$base" ]; then
+        info "the x2 upscale failed last time on these same files: her pack stays without it (--upscale tries again)"
         x2=0
-        [ "${M_pack_upscale:-off}" != on ] || x2=1
     fi
     if [ "$x2" = 1 ] && [ "$DRY" = 0 ] && [ ! -f "$LIB/tools/upscale_art.py" ]; then
         warn "the x2 upscale: her release has no tools/upscale_art.py (the next one does), so her pack is built without it"
         x2=0
     fi
+
+    # make-pack's Python in the installer's own venv: fonttools (failing, the install stops); mochi's
+    # hair recolour's numpy and Pillow, and the x2 upscale's torch, scipy and the same two, never fatal.
+    if [ ! -x "$VENV/bin/python" ]; then
+        mkdir_rec "$CACHE"
+        run python3 -m venv "$VENV"
+    fi
+    local -a want art up torch=() rest=()
+    local w hair=red pipx=("$VENV/bin/python" -m pip install -q --disable-pip-version-check --no-cache-dir)
+    read -r -a want <<<"$M_pip_pack"
+    read -r -a art <<<"${M_pip_local_art:-}"
+    if [ "$(cat "$VENV/.capri-pip" 2>/dev/null)" = "${want[*]}" ]; then
+        good "make-pack's Python: ${want[*]} (venv $(tilde "$VENV"))"
+    else
+        run "${pipx[@]}" "${want[@]}"
+        [ "$DRY" = 1 ] || printf '%s\n' "${want[*]}" >"$VENV/.capri-pip"
+    fi
+    if [ "$mochi" = 1 ] && [ ${#art[@]} -gt 0 ]; then
+        if [ "$(cat "$VENV/.capri-pip-art" 2>/dev/null)" = "${art[*]}" ]; then
+            good "mochi's hair recolour: ${art[*]}"
+        elif try_logged "$CACHE/pip-art.log" "${pipx[@]}" "${art[@]}"; then
+            [ "$DRY" = 1 ] || printf '%s\n' "${art[*]}" >"$VENV/.capri-pip-art"
+        else
+            warn "pip couldn't install ${art[*]} ($(pip_why "$CACHE/pip-art.log")): mochi's close-ups keep her hair as drawn (--mochi-hair original)"
+            hair=original
+        fi
+    fi
     if [ "$x2" = 1 ]; then
-        # torch from its CPU index alone (never PyPI's: there it pulls CUDA, GBs), the rest from PyPI.
-        local -a up torch=() rest=()
-        local w pipx=("$VENV/bin/python" -m pip install -q --disable-pip-version-check --no-cache-dir)
-        read -r -a up <<<"${M_pip_upscale:-torch scipy}"
+        # torch from its CPU index alone (never PyPI's: there it pulls CUDA, GBs); scipy, numpy and
+        # Pillow from PyPI.
+        read -r -a up <<<"${M_pip_upscale:-torch==2.15.0 scipy}"
         for w in "${up[@]}"; do
             case $w in torch*) torch+=("$w") ;; *) rest+=("$w") ;; esac
         done
-        if [ "$(cat "$VENV/.capri-pip-x2" 2>/dev/null)" = "${up[*]}" ]; then
-            good "the x2 upscale's Python: ${up[*]} (venv $(tilde "$VENV"))"
+        rest+=("${art[@]}")
+        if [ "$(cat "$VENV/.capri-pip-x2" 2>/dev/null)" = "${up[*]} ${art[*]}" ]; then
+            good "the x2 upscale's Python: ${up[*]} ${art[*]} (venv $(tilde "$VENV"))"
         else
-            info "the x2 upscale's Python: ${up[*]}, torch's CPU build (~255 MB to download, ~1 GB in the venv)"
-            if try_logged "$CACHE/pip-x2.log" "${pipx[@]}" --index-url "${M_pip_upscale_index:-https://download.pytorch.org/whl/cpu}" "${torch[@]}" &&
+            info "the x2 upscale's Python: ${up[*]} ${art[*]}, torch's CPU build (~255 MB to download, ~1.1 GB in the venv)"
+            if { [ ${#torch[@]} = 0 ] || try_logged "$CACHE/pip-x2.log" "${pipx[@]}" --index-url "${M_pip_upscale_index:-https://download.pytorch.org/whl/cpu}" "${torch[@]}"; } &&
                 { [ ${#rest[@]} = 0 ] || try_logged "$CACHE/pip-x2.log" "${pipx[@]}" "${rest[@]}"; }; then
-                [ "$DRY" = 1 ] || printf '%s\n' "${up[*]}" >"$VENV/.capri-pip-x2"
+                [ "$DRY" = 1 ] || printf '%s\n' "${up[*]} ${art[*]}" >"$VENV/.capri-pip-x2"
             else
-                warn "pip couldn't install ${up[*]} ($({ grep '^ERROR' "$CACHE/pip-x2.log" || tail -n1 "$CACHE/pip-x2.log"; } 2>/dev/null | tail -n1 | cut -c1-120)): her pack is built without the x2 upscale"
+                warn "pip couldn't install ${up[*]} ${art[*]} ($(pip_why "$CACHE/pip-x2.log")): her pack is built without the x2 upscale"
                 x2=0
             fi
         fi
@@ -913,20 +941,19 @@ step_pack() {
         good "CapriCore ${M_capricore_commit:0:7} (cached)"
     fi
 
-    # Up to date: same make-pack, pins, moods, persona and flags as last time, and it still checks.
-    # A pack without mochi's art (an install from before it was the default) is built again with it.
-    local base mochi=$LOCAL_ART
-    base=$({ cat "$LIB/tools/make-pack" "$LIB"/tools/*.sha256 "$LIB/tools/desktop-art.json" "$LIB/tools/capricore-outfit.json" "$LIB/packs/capri/moods.json" \
-        "$LIB/packs/capri/persona.md" "$LIB/tools/mochi_hair.py" "$LIB/tools/upscale_art.py" 2>/dev/null || true; } | sha256sum | cut -c1-16)
-    if [ "$DRY" = 0 ] && [ "$(meta pack)" = "$base-$mochi-x$x2" ] && [ -f "$PACK/sprites.json" ] &&
+    # Up to date: same files and the same pack as last time, and it still checks. A pack without
+    # mochi's art (an install from before it was the default) is built again with it.
+    local m=$mochi
+    [ "$mochi" = 0 ] || [ "$hair" = red ] || m=1o
+    if [ "$DRY" = 0 ] && [ "$(meta pack)" = "$base-$m-x$x2" ] && [ -f "$PACK/sprites.json" ] &&
         "$BIN/synaps-avatar" --pack "$PACK" --check >/dev/null 2>&1; then
         good "up to date ($(tilde "$PACK"))"
-        PACK_HOW=$(pack_how "$mochi" "$x2")
+        rec_meta pack_choice "$chose"
+        PACK_HOW=$(pack_how "$m" "$x2")
         notices
         return 0
     fi
     [ "$mochi" = 0 ] || info "with mochi's art (her intro close-ups and face cut-ins; --no-local-art leaves it out)"
-    [ "$x2" = 0 ] || info "with lachy's strips at x2 (Real-ESRGAN on the CPU, 4 threads, nice 10: about 45 min)"
     [ -d "$CACHE_ROOT/capri-desktop" ] || rec dir "$CACHE_ROOT/capri-desktop"
     [ "$x2" = 0 ] || [ -d "$CACHE_ROOT/models" ] || rec dir "$CACHE_ROOT/models"
     mkp "$(dirname "$PACK")"
@@ -937,72 +964,99 @@ step_pack() {
         warn "$(tilde "$PACK") is a pack this script didn't make: it goes to $(tilde "$aside") (yours: --uninstall leaves it)"
         run mv "$PACK" "$aside"
     fi
-    # The full pack first. The extras never fail the install: a failed upscale is built again without
-    # the x2 strips, then a failure of mochi's art without it; CapriCore + lachy failing does.
-    local log=$CACHE/make-pack.log why
-    local -a side
-    while :; do
-        side=(--lachy auto)
-        [ "$mochi" = 0 ] || side+=(--mochi auto)
-        [ "$x2" = 0 ] || side+=(--upscale)
+    # Built and checked beside the one in place. The extras never fail the install: anything failing
+    # with mochi's art (make-pack, or her --check) is built again without it; the x2 strips are the same
+    # pack again with --upscale, and failing, the pack without them stays. CapriCore + lachy failing does.
+    local log=$CACHE/make-pack.log
+    local -a ma=()
+    [ "$hair" = red ] || ma=(--mochi-hair original)
+    if [ "$mochi" = 1 ] && ! pack_try "$PACK.new" --lachy auto --mochi auto "${ma[@]}"; then
+        warn "her pack with mochi's art didn't work ($WHY): it's built without it (the whole log: $(tilde "$log"))"
+        mochi=0 m=0 ma=()
+    fi
+    if [ "$mochi" = 0 ] && ! pack_try "$PACK.new" --lachy auto; then
+        [ ! -s "$log" ] || tail -n 25 "$log" | sed 's/^/     /' >&2
         run rm -rf "$PACK.new"
-        if [ "$mochi" = 0 ] && [ "$x2" = 0 ]; then
-            run "$VENV/bin/python" "$LIB/tools/make-pack" "$cc" "$PACK.new" "${side[@]}"
-            break
-        fi
-        if try_logged "$log" nice -n 10 "$VENV/bin/python" "$LIB/tools/make-pack" "$cc" "$PACK.new" "${side[@]}"; then
-            [ "$DRY" = 1 ] || grep '^make-pack: ' "$log" | sed 's/^/     /'
-            break
-        fi
-        why=$(grep '^make-pack:' "$log" | tail -n1 | cut -c1-200)
-        if [ "$x2" = 1 ]; then
-            warn "the x2 upscale didn't work (${why:-see the log}): her pack is built without it (the whole log: $(tilde "$log"))"
+        die "make-pack couldn't build her pack: $WHY (the whole log: $log)"
+    fi
+    if [ "$x2" = 1 ]; then
+        info "and lachy's strips at x2 (Real-ESRGAN on the CPU, 4 threads, nice 10: about 45 min)"
+        local -a mx=()
+        [ "$mochi" = 0 ] || mx=(--mochi auto "${ma[@]}")
+        if pack_try "$PACK.x2" --lachy auto "${mx[@]}" --upscale; then
+            run rm -rf "$PACK.new"
+            run mv "$PACK.x2" "$PACK.new"
+            rec_meta pack_x2_failed ''
+        else
+            warn "the x2 upscale didn't work ($WHY): her pack is built without it (the whole log: $(tilde "$log"))"
+            run rm -rf "$PACK.x2"
             x2=0
-            continue
+            rec_meta pack_x2_failed "$base"
         fi
-        case $why in
-            *--mochi* | *"README has no"*) ;;
-            *)
-                tail -n 25 "$log" | sed 's/^/     /' >&2
-                die "make-pack couldn't build her pack; the whole log: $log"
-                ;;
-        esac
-        warn "mochi's art couldn't be added ($why): her pack is built without it"
-        mochi=0
-    done
+    fi
     run rm -rf "$PACK.old"
     if [ -d "$PACK" ]; then run mv "$PACK" "$PACK.old"; fi
     run mv "$PACK.new" "$PACK"
     run rm -rf "$PACK.old"
     rec dir "$PACK"
-    rec_meta pack "$base-$mochi-x$x2"
-    PACK_HOW=$(pack_how "$mochi" "$x2")
+    rec_meta pack "$base-$m-x$x2"
+    rec_meta pack_choice "$chose"
+    PACK_HOW=$(pack_how "$m" "$x2")
     notices
-    if [ "$DRY" = 0 ]; then
-        local out
-        out=$("$BIN/synaps-avatar" --pack "$PACK" --check 2>&1) || {
-            printf '%s\n' "$out" | tail -n5 >&2
-            die "her pack doesn't check: synaps-avatar --check failed"
-        }
-        good "$(printf '%s\n' "$out" | grep -o 'pack `[^`]*` ok: [0-9]* frames[^,]*' | head -n1) (--check)"
-    else
-        run "$BIN/synaps-avatar" --pack "$PACK" --check
-    fi
+    [ "$DRY" = 1 ] || good "${CHECKED:-her pack} (--check)"
 }
 
-# What her pack holds, for the summary.
+# pip's reason, from its log: its last ERROR line, else its last line.
+pip_why() { { grep '^ERROR' "$1" || tail -n1 "$1"; } 2>/dev/null | tail -n1 | cut -c1-120; }
+
+# make-pack into DIR (cc, log: step_pack's), then her --check on it: what it said in CHECKED, or why it
+# failed in WHY. -B: no __pycache__ in her lib folder.
+pack_try() {
+    local dir=$1
+    shift
+    WHY=''
+    run rm -rf "$dir"
+    if ! try_logged "$log" nice -n 10 "$VENV/bin/python" -B "$LIB/tools/make-pack" "$cc" "$dir" "$@"; then
+        # Its own last word, or a Python error's (a traceback's last line).
+        if grep -q '^Traceback ' "$log" 2>/dev/null; then
+            WHY=$(grep -v '^\s*$' "$log" | tail -n1 | cut -c1-200)
+        else
+            WHY=$({ grep '^make-pack:' "$log" || tail -n1 "$log"; } 2>/dev/null | tail -n1 | cut -c1-200)
+        fi
+        WHY=${WHY:-make-pack failed}
+        return 1
+    fi
+    if [ "$DRY" = 1 ]; then
+        run "$BIN/synaps-avatar" --pack "$dir" --check
+        return 0
+    fi
+    grep '^make-pack: ' "$log" | sed 's/^/     /'
+    if ! "$BIN/synaps-avatar" --pack "$dir" --check >"$CACHE/check.log" 2>&1; then
+        WHY="it doesn't pass her --check: $(tail -n1 "$CACHE/check.log" | cut -c1-160)"
+        return 1
+    fi
+    CHECKED=$(grep -o 'pack `[^`]*` ok: [0-9]* frames[^,]*' "$CACHE/check.log" | head -n1)
+}
+
+# What her pack holds, for the summary (mochi: 0, 1, or 1o with her hair as drawn).
 pack_how() {
-    printf 'capri (CapriCore v1.0.4 + lachy%s%s)' "$([ "$1" = 1 ] && echo " + mochi")" "$([ "$2" = 1 ] && echo ", x2 strips")"
+    printf 'capri (CapriCore v1.0.4 + lachy%s%s)' "$([ "$1" = 0 ] || echo " + mochi")" "$([ "$2" = 1 ] && echo ", x2 strips")"
 }
 
 # Whose art is in her pack and on what terms: its NOTICE.md says it all; here, each source's licence and
 # its Required Notice lines.
 notices() {
-    local l=$PACK/anim/lachy/LICENSE.md m=$PACK/anim/mochi/LICENSE f line
+    local l=$PACK/anim/lachy/LICENSE.md m=$PACK/anim/mochi/LICENSE f line from='' q
     [ -f "$l" ] || [ -f "$m" ] || return 0
-    info "her desktop art was downloaded here, straight from its artists' repositories (capri-syn's repo never holds or redistributes it); their terms apply: $(tilde "$PACK/NOTICE.md")"
+    [ ! -f "$l" ] || from=lachydotmcg/capri-desktop
+    [ ! -f "$m" ] || from="${from:+$from, }mochiiwuff/capri-desktop"
+    info "her desktop art was downloaded onto your machine from the repositories that publish it ($from); the art files are not in capri-syn's repository. Its terms: $(tilde "$PACK/NOTICE.md")"
     [ ! -f "$l" ] || info "lachy's desktop art: PolyForm Noncommercial 1.0.0 (https://polyformproject.org/licenses/noncommercial/1.0.0)"
-    [ ! -f "$m" ] || info "mochi's art: its repo's PolyForm Noncommercial 1.0.0 covers its code; the character rights its README notes cover the images"
+    if [ -f "$m" ]; then
+        # mochi's README in its own words (make-pack quotes its "Credits and rights" in NOTICE.md).
+        q=$(awk '/^## Images from mochiiwuff/ { s = 1; next } s && /^> / { print substr($0, 3); exit }' "$PACK/NOTICE.md" 2>/dev/null)
+        info "mochi's art, its README (\"Credits and rights\"): ${q:-in $(tilde "$PACK/NOTICE.md")}"
+    fi
     for f in "$l" "$m"; do
         [ -f "$f" ] || continue
         grep '^Required Notice:' "$f" | while IFS= read -r line; do
@@ -2465,7 +2519,7 @@ summary() {
     printf '\n %s▌installed%s%s\n' "$R$B" "$N" "$([ "$DRY" = 1 ] && printf '  %s(dry run: nothing was)%s' "$R" "$N")"
     printf '   %-*s %s\n' $w synaps "${SYNAPS_V:-?}  $(tilde "$SYNAPS")"
     printf '   %-*s %s\n' $w synaps-avatar "${BIN_VER:-?}  $(tilde "$BIN/synaps-avatar")"
-    printf '   %-*s %s\n' $w "her pack" "${PACK_HOW:-$(pack_how "$LOCAL_ART" 0)}  $(tilde "$PACK")"
+    printf '   %-*s %s\n' $w "her pack" "${PACK_HOW:-$(pack_how "${LOCAL_ART:-1}" 0)}  $(tilde "$PACK")"
     printf '   %-*s %s\n' $w daemon "${DAEMON_STATE:-?}, ${DAEMON_HOW:-?}"
     printf '   %-*s %s\n' $w summon "${SUMMON:-?}"
     printf '   %-*s %s\n' $w autostart "${AUTOSTART_HOW:-?}"
