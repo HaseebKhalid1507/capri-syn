@@ -1165,7 +1165,9 @@ function Build-Pack {
             $side = @('--lachy', 'auto')
             if ($mochi) { $side += @('--mochi', 'auto') }
             if ($x2) { $side += '--upscale' }
-            $rc = Invoke-Logged $py (@('-X', 'utf8', '-u', (Join-Path $script:Root 'tools\make-pack'), $cc, $new) + $side)
+            # -B: no __pycache__ beside mochi_hair.py and upscale_art.py (in her installer, {app}\steps\tools:
+            # its uninstaller removes only what it installed).
+            $rc = Invoke-Logged $py (@('-X', 'utf8', '-B', '-u', (Join-Path $script:Root 'tools\make-pack'), $cc, $new) + $side)
             if (-not $rc) { break }
             $why = "$(@($script:Last | Where-Object { $_ -like 'make-pack:*' } | Select-Object -Last 1))"
             if (-not $why) { $why = "$(@($script:Last | Select-Object -Last 1))" }

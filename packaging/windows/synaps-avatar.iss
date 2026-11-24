@@ -150,6 +150,9 @@ Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile
 [UninstallDelete]
 ; Her old exe, renamed aside by an upgrade while a process of hers still mapped it.
 Type: files; Name: "{app}\synaps-avatar.exe.old-*"
+; Python's cache beside make-pack's helpers, if a pack step wrote one ({app}\steps is the steps' own;
+; steps.ps1 runs make-pack with -B so it doesn't).
+Type: filesandordirs; Name: "{app}\steps\tools\__pycache__"
 ; What she and the steps wrote: her log and state, her settings, the steps' download cache and this
 ; installer's note of what it did. Any pack he put in packs\ himself stays (and the one moved aside);
 ; her pack goes in code (when the steps made it). Installed by install.ps1 (/BY=install.ps1), her
