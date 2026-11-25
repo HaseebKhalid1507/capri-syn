@@ -131,6 +131,11 @@ Check ($mochi.Count -ge 25 -and (Test-Path (Join-Path $pack 'anim\mochi\LICENSE'
 $notice = if (Test-Path (Join-Path $pack 'NOTICE.md')) { Get-Content -Raw (Join-Path $pack 'NOTICE.md') } else { '' }
 Check ($notice -match '## Images from mochiiwuff/capri-desktop' -and $notice -match 'Required Notice: Copyright \(c\) 2026 mochiiwuff') "its NOTICE.md has mochi's section and Required Notice line"
 Check (-not (Test-Path (Join-Path $pack 'anim\lachy\x2'))) 'no x2 strips (pack_upscale: off)'
+# Its boxes left as they were: no flag for them (the steps' defaults), so none is noted as his choice.
+$packArgs = [regex]::Match($setupLog, '(?m)^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\S*\s+step pack: (?!exit )(.*?)\r?$').Groups[1].Value
+Check ($packArgs -eq 'pack') "the pack step got no box's flag: steps.ps1 $packArgs"
+$choice = @(Get-Content -LiteralPath (Join-Path $pack '.capri-syn-pack') -ErrorAction SilentlyContinue | Where-Object { $_ -like 'choice=*' })
+Check ($choice -contains 'choice=mochi=- x2=-') "and its marker notes no choice: $choice"
 $before = if (Test-Path $herLog) { (Get-Item $herLog).Length } else { 0 }
 $c = Start-Process $exe -ArgumentList "--pack `"$pack`" --check" -Wait -PassThru -WindowStyle Hidden
 $text = if (Test-Path $herLog) { (Get-Content -Raw $herLog).Substring([int]$before) } else { '' }

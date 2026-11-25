@@ -853,10 +853,12 @@ step_pack() {
         [ "$DRY" = 1 ] || die "python3 is needed for her pack (install it, then run this again)"
         info "(python3: from the system packages above)"
     fi
-    # What make-pack reads: a pack built from other files (a new release) is built again.
+    # What make-pack reads, and the Python it runs with (the manifest's pip pins): a pack built from
+    # other files (a new release) or other pins is built again.
     local base
     base=$({ cat "$LIB/tools/make-pack" "$LIB"/tools/*.sha256 "$LIB/tools/desktop-art.json" "$LIB/tools/capricore-outfit.json" "$LIB/packs/capri/moods.json" \
-        "$LIB/packs/capri/persona.md" "$LIB/tools/mochi_hair.py" "$LIB/tools/upscale_art.py" 2>/dev/null || true; } | sha256sum | cut -c1-16)
+        "$LIB/packs/capri/persona.md" "$LIB/tools/mochi_hair.py" "$LIB/tools/upscale_art.py" 2>/dev/null || true
+        printf '%s\n' "$M_pip_pack" "${M_pip_local_art:-}" "${M_pip_upscale:-}"; } | sha256sum | cut -c1-16)
     # mochi's art and the x2 strips: as the flags say, else as they said last time (the receipt's
     # pack_choice: only what was asked for), else the defaults (mochi's art on; x2 as the manifest's
     # pack_upscale says).
@@ -865,7 +867,6 @@ step_pack() {
     case " $pick " in *" mochi=0 "*) pm=0 ;; *" mochi=1 "*) pm=1 ;; esac
     case " $pick " in *" x2=0 "*) px=0 ;; *" x2=1 "*) px=1 ;; esac
     [ -n "$LOCAL_ART" ] || [ "$pm" != 0 ] || info "without mochi's art, as asked last time (--with-local-art adds it)"
-    [ -n "$UPSCALE" ] || [ "$px" != 1 ] || info "with lachy's strips at x2, as asked last time (--no-upscale leaves them out)"
     pm=${LOCAL_ART:-$pm} px=${UPSCALE:-$px}
     chose="mochi=${pm:--} x2=${px:--}"
     mochi=${pm:-1}
@@ -876,6 +877,8 @@ step_pack() {
     if [ "$x2" = 1 ] && [ -z "$UPSCALE" ] && [ "$(meta pack_x2_failed)" = "$base" ]; then
         info "the x2 upscale failed last time on these same files: her pack stays without it (--upscale tries again)"
         x2=0
+    elif [ -z "$UPSCALE" ] && [ "$px" = 1 ]; then
+        info "with lachy's strips at x2, as asked last time (--no-upscale leaves them out)"
     fi
     if [ "$x2" = 1 ] && [ "$DRY" = 0 ] && [ ! -f "$LIB/tools/upscale_art.py" ]; then
         warn "the x2 upscale: her release has no tools/upscale_art.py (the next one does), so her pack is built without it"
@@ -883,7 +886,8 @@ step_pack() {
     fi
 
     # make-pack's Python in the installer's own venv: fonttools (failing, the install stops); mochi's
-    # hair recolour's numpy and Pillow, and the x2 upscale's torch, scipy and the same two, never fatal.
+    # hair recolour's numpy and Pillow, and the x2 upscale's torch, scipy and the same two, never fatal
+    # (and as wheels only: nothing is compiled here).
     if [ ! -x "$VENV/bin/python" ]; then
         mkdir_rec "$CACHE"
         run python3 -m venv "$VENV"
@@ -901,7 +905,7 @@ step_pack() {
     if [ "$mochi" = 1 ] && [ ${#art[@]} -gt 0 ]; then
         if [ "$(cat "$VENV/.capri-pip-art" 2>/dev/null)" = "${art[*]}" ]; then
             good "mochi's hair recolour: ${art[*]}"
-        elif try_logged "$CACHE/pip-art.log" "${pipx[@]}" "${art[@]}"; then
+        elif try_logged "$CACHE/pip-art.log" "${pipx[@]}" --only-binary :all: "${art[@]}"; then
             [ "$DRY" = 1 ] || printf '%s\n' "${art[*]}" >"$VENV/.capri-pip-art"
         else
             warn "pip couldn't install ${art[*]} ($(pip_why "$CACHE/pip-art.log")): mochi's close-ups keep her hair as drawn (--mochi-hair original)"
@@ -921,10 +925,14 @@ step_pack() {
         else
             info "the x2 upscale's Python: ${up[*]} ${art[*]}, torch's CPU build (~255 MB to download, ~1.1 GB in the venv)"
             if { [ ${#torch[@]} = 0 ] || try_logged "$CACHE/pip-x2.log" "${pipx[@]}" --index-url "${M_pip_upscale_index:-https://download.pytorch.org/whl/cpu}" "${torch[@]}"; } &&
-                { [ ${#rest[@]} = 0 ] || try_logged "$CACHE/pip-x2.log" "${pipx[@]}" "${rest[@]}"; }; then
+                { [ ${#rest[@]} = 0 ] || try_logged "$CACHE/pip-x2.log" "${pipx[@]}" --only-binary :all: "${rest[@]}"; }; then
                 [ "$DRY" = 1 ] || printf '%s\n' "${up[*]} ${art[*]}" >"$VENV/.capri-pip-x2"
             else
-                warn "pip couldn't install ${up[*]} ${art[*]} ($(pip_why "$CACHE/pip-x2.log")): her pack is built without the x2 upscale"
+                # torch 2.15 has no wheel for Python 3.10 (Ubuntu 22.04's): said, and how to stop asking.
+                local pyv
+                pyv=$(sed -n 's/^version *= *\([0-9]*\.[0-9]*\).*/\1/p' "$VENV/pyvenv.cfg" 2>/dev/null | head -n1 || true)
+                case ${#torch[@]}:$pyv in 0:* | *:) pyv='' ;; *:3.[0-9] | *:3.10) pyv="; ${torch[*]/==/ } needs Python 3.11 or newer, this venv's is $pyv" ;; *) pyv='' ;; esac
+                warn "pip couldn't install ${up[*]} ${art[*]} ($(pip_why "$CACHE/pip-x2.log")$pyv): her pack is built without the x2 upscale (--no-upscale stops asking for it)"
                 x2=0
             fi
         fi
@@ -945,12 +953,8 @@ step_pack() {
     # mochi's art (an install from before it was the default) is built again with it.
     local m=$mochi
     [ "$mochi" = 0 ] || [ "$hair" = red ] || m=1o
-    if [ "$DRY" = 0 ] && [ "$(meta pack)" = "$base-$m-x$x2" ] && [ -f "$PACK/sprites.json" ] &&
-        "$BIN/synaps-avatar" --pack "$PACK" --check >/dev/null 2>&1; then
-        good "up to date ($(tilde "$PACK"))"
-        rec_meta pack_choice "$chose"
-        PACK_HOW=$(pack_how "$m" "$x2")
-        notices
+    if pack_is "$base-$m-x$x2"; then
+        pack_kept "up to date ($(tilde "$PACK"))"
         return 0
     fi
     [ "$mochi" = 0 ] || info "with mochi's art (her intro close-ups and face cut-ins; --no-local-art leaves it out)"
@@ -973,6 +977,13 @@ step_pack() {
     if [ "$mochi" = 1 ] && ! pack_try "$PACK.new" --lachy auto --mochi auto "${ma[@]}"; then
         warn "her pack with mochi's art didn't work ($WHY): it's built without it (the whole log: $(tilde "$log"))"
         mochi=0 m=0 ma=()
+        # The one in place may be that pack already (mochi's art failing last time too, its repo down):
+        # kept, not built again (with the x2 strips, that's ~45 min).
+        if pack_is "$base-0-x$x2"; then
+            run rm -rf "$PACK.new"
+            pack_kept "her pack without it is in place already and passes her --check: kept ($(tilde "$PACK"))"
+            return 0
+        fi
     fi
     if [ "$mochi" = 0 ] && ! pack_try "$PACK.new" --lachy auto; then
         [ ! -s "$log" ] || tail -n 25 "$log" | sed 's/^/     /' >&2
@@ -1004,6 +1015,20 @@ step_pack() {
     PACK_HOW=$(pack_how "$m" "$x2")
     notices
     [ "$DRY" = 1 ] || good "${CHECKED:-her pack} (--check)"
+}
+
+# The pack in place was built as KEY (base-mochi-x2, the receipt's meta pack) and still passes her --check.
+pack_is() {
+    [ "$DRY" = 0 ] && [ "$(meta pack)" = "$1" ] && [ -f "$PACK/sprites.json" ] &&
+        "$BIN/synaps-avatar" --pack "$PACK" --check >/dev/null 2>&1
+}
+
+# step_pack's pack in place, kept (WHAT, said): what was asked noted, the summary's line, its notices.
+pack_kept() {
+    good "$1"
+    rec_meta pack_choice "$chose"
+    PACK_HOW=$(pack_how "$m" "$x2")
+    notices
 }
 
 # pip's reason, from its log: its last ERROR line, else its last line.
@@ -2655,6 +2680,10 @@ uninstall() {
             esac
         done < <(tac "$RECEIPT")
         if [ "$reload" = 1 ] && systemd_user; then run systemctl --user daemon-reload; fi
+        # Her pack half made beside it (a build stopped part way, never recorded): this script's own.
+        for d in "$PACK.new" "$PACK.x2" "$PACK.old"; do
+            if [ -d "$d" ]; then run rm -rf "$d"; fi
+        done
         # What didn't come out stays in the receipt, for the next --uninstall (below, with the
         # folders this made that are still there); with nothing to keep, the receipt goes.
         if [ ${#keep[@]} = 0 ]; then run rm -f "$RECEIPT"; fi

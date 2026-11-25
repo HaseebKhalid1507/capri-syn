@@ -12,8 +12,8 @@
 ;     mochi's (its box, ticked; /LOCALART=off unticks it); lachy's strips at x2 with its box (unticked:
 ;     installer/manifest's pack_upscale; /UPSCALE=on ticks it). A rerun's boxes start as the last
 ;     download's were (the pack's marker). Her art is never in this installer: it's downloaded onto his
-;     machine from the repositories that publish it (lachydotmcg/capri-desktop, mochiiwuff/capri-desktop);
-;     its terms are in the pack's NOTICE.md.
+;     machine from the repositories that publish it (CapriChooms/CapriCore, lachydotmcg/capri-desktop,
+;     mochiiwuff/capri-desktop); its terms are in the pack's NOTICE.md.
 ;   - Her model (page "Her model", when Synaps has none yet): an account to sign in to (the finish page
 ;     signs in: his browser opens on the page; Copilot's code in a small window), a model on this PC
 ;     (Ollama's, LM Studio's), an API key (to Synaps on its stdin, never on a command line), or later
@@ -194,6 +194,8 @@ var
   SynapsStatus: TNewStaticText;
   DownloadRadio, FolderRadio, SkipRadio: TNewRadioButton;
   MochiBox, UpscaleBox: TNewCheckBox;
+  { How the page first showed those boxes (PackFlags: only a change is his choice). }
+  MochiStart, UpscaleStart: Boolean;
   FolderEdit: TNewEdit;
   BrowseButton: TNewButton;
   Progress: TOutputMarqueeProgressWizardPage;
@@ -305,12 +307,19 @@ begin
       Result := True;
 end;
 
-{ The download's steps.ps1 pack flags, as its boxes say. }
+{ The download's steps.ps1 pack flags: one for a box he changed from how the page first showed it,
+  or that /LOCALART= or /UPSCALE= set. A box left as it was gives none: the steps do as the last
+  download was asked (its marker), else their defaults, as the box showed; a default isn't noted as
+  his choice. }
 function PackFlags: String;
 begin
   Result := '';
-  if MochiBox.Checked then Result := Result + ' -LocalArt' else Result := Result + ' -NoLocalArt';
-  if UpscaleBox.Checked then Result := Result + ' -Upscale' else Result := Result + ' -NoUpscale';
+  if (MochiBox.Checked <> MochiStart) or ParamOn('LOCALART') or ParamOff('LOCALART') then begin
+    if MochiBox.Checked then Result := Result + ' -LocalArt' else Result := Result + ' -NoLocalArt';
+  end;
+  if (UpscaleBox.Checked <> UpscaleStart) or ParamOn('UPSCALE') or ParamOff('UPSCALE') then begin
+    if UpscaleBox.Checked then Result := Result + ' -Upscale' else Result := Result + ' -NoUpscale';
+  end;
 end;
 
 { His pick on the pack page (unattended: /PACK=, as the page started on it). }
@@ -973,9 +982,11 @@ begin
   UpscaleBox.Left := ScaleX(18);
   UpscaleBox.Width := PackPage.SurfaceWidth - ScaleX(18);
   UpscaleBox.Checked := ParamOn('UPSCALE') or (not ParamOff('UPSCALE') and LastChose('x2=1'));
-  T := NewText(PackPage, 'From lachydotmcg/capri-desktop and mochiiwuff/capri-desktop at pinned versions, every file ' +
-    'checked against its SHA-256; the art files are not in capri-syn''s repository. Its terms are in the pack''s ' +
-    'NOTICE.md, and its notices are shown when it''s done.', ScaleX(18), UpscaleBox.Top + UpscaleBox.Height + ScaleY(2));
+  MochiStart := MochiBox.Checked;
+  UpscaleStart := UpscaleBox.Checked;
+  T := NewText(PackPage, 'From CapriChooms/CapriCore, lachydotmcg/capri-desktop and mochiiwuff/capri-desktop at pinned versions, ' +
+    'every file checked by its SHA-256; the art files are not in capri-syn''s repository. Its terms are in the ' +
+    'pack''s NOTICE.md, its notices shown when it''s done.', ScaleX(18), UpscaleBox.Top + UpscaleBox.Height + ScaleY(2));
   Y := T.Top + T.Height + ScaleY(10);
   FolderRadio := NewRadio(PackPage, 'Use a pack folder I already have', Y, @PackChoiceClick);
   FolderEdit := TNewEdit.Create(PackPage);

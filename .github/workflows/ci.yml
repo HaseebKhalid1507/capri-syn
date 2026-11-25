@@ -477,10 +477,12 @@ jobs:
           # The full pack by default (mochi's art; the x2 strips as the manifest's pack_upscale says), and the opt-outs.
           grep -q 'make-pack .* --lachy auto --mochi auto$' /tmp/dry.log
           grep -q 'her pack .*capri (CapriCore v1.0.4 + lachy + mochi)' /tmp/dry.log
+          # numpy and Pillow (mochi's hair recolour): exact pins, wheels only.
+          grep -qF -- "--no-cache-dir --only-binary :all: 'numpy==2.2.6;python_version<\"3.12\"' 'numpy==2.5.5;python_version>=\"3.12\"' Pillow==12.3.0" /tmp/dry.log
           bash install.sh --dry-run --no-local-art --upscale >/tmp/dry-x2.log
           grep -q 'make-pack .* --lachy auto --upscale$' /tmp/dry-x2.log
           grep -q -- '--index-url https://download.pytorch.org/whl/cpu torch==2.15.0$' /tmp/dry-x2.log
-          grep -q -- "--no-cache-dir scipy 'numpy>=1.26,<3' 'Pillow>=10,<14'$" /tmp/dry-x2.log
+          grep -qF -- "--no-cache-dir --only-binary :all: scipy 'numpy==2.2.6;python_version<\"3.12\"' 'numpy==2.5.5;python_version>=\"3.12\"' Pillow==12.3.0" /tmp/dry-x2.log
           bash install.sh --dry-run --upscale --no-upscale >/tmp/dry-no-x2.log
           grep -q 'make-pack .* --lachy auto --mochi auto$' /tmp/dry-no-x2.log
           bash install.sh --dry-run --from-source --voice --watch

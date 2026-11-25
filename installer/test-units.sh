@@ -1210,12 +1210,14 @@ INT
 # fails that run as make-pack does; pip fails when its arguments hold PIP_FAIL), her binary's --check
 # (CHECK_FAIL=mochi: a pack with mochi's art doesn't pass), a cached CapriCore. The full pack is the
 # default; the x2 strips and mochi's art never fail the install; a pack built before mochi's art was
-# the default is built again with it; a rerun keeps what was asked.
+# the default is built again with it; a rerun keeps what was asked; --uninstall takes the half-made
+# ones beside it too.
 (
     p=$tmp/pack-home
     HOME=$p DATA=$p/.local/share CACHE_BASE=$p/.cache CACHE_ROOT=$p/.cache/synaps-avatar CACHE=$p/.cache/synaps-avatar/installer
     PACK=$DATA/synaps-avatar/packs/capri RECEIPT=$DATA/synaps-avatar/install.receipt VENV=$CACHE/venv BIN=$p/bin LIB=$p/lib
-    M_pip_pack=fonttools==4.65.0 M_pip_local_art='numpy>=1.26,<3 Pillow>=10,<14' M_pip_upscale='torch==2.15.0 scipy' M_pip_upscale_index=https://download.pytorch.org/whl/cpu
+    art='numpy==2.2.6;python_version<"3.12" numpy==2.5.5;python_version>="3.12" Pillow==12.3.0'
+    M_pip_pack=fonttools==4.65.0 M_pip_local_art=$art M_pip_upscale='torch==2.15.0 scipy' M_pip_upscale_index=https://download.pytorch.org/whl/cpu
     M_capricore_repo=CapriChooms/CapriCore M_capricore_commit=bc93892c751a73fdce14355b477dcdc775e46fd9 M_pack_upscale=off
     RUN_REAL=1 LOCAL_ART='' UPSCALE=''
     # The receipt's meta lines for real here (above, a stand-in that keeps nothing).
@@ -1258,7 +1260,7 @@ SH
     chmod +x "$VENV/bin/python" "$BIN/synaps-avatar"
     export CALLS=$p/calls
     # One step_pack: its output in $p/out, its make-pack and pip runs in $p/calls, its exit code in PRC.
-    pack() { : >"$CALLS"; (step_pack) >"$p/out" 2>&1; PRC=$?; }
+    pack() { : >"$CALLS"; (set -e; step_pack) >"$p/out" 2>&1; PRC=$?; }
     builds() { grep -c '^make-pack ' "$CALLS"; }
     last() { grep '^make-pack ' "$CALLS" | tail -n1; }
     said() { grep -qF -- "$1" "$p/out"; }
@@ -1274,6 +1276,8 @@ SH
         "and it says where the art came from, its README's own words and each Required Notice; no personal-use warning"
     pack
     check "$([ "$PRC" = 0 ] && [ "$(builds)" = 0 ] && said 'up to date' && echo 0)" "again: up to date, nothing built"
+    M_pip_upscale='torch==2.16.0 scipy' pack
+    check "$([ "$PRC" = 0 ] && [ "$(builds)" = 1 ] && echo 0)" "the manifest's pip pins are in its fingerprint: another pin, built again"
     # An install before this one: its pack without mochi's art, and the fingerprint it recorded then.
     rm -rf "$PACK/anim/mochi"
     sed -i 's/^\(meta\tpack\t\).*/\1f00dcafe0badf00-0/' "$RECEIPT"
@@ -1293,9 +1297,9 @@ SH
     rm -f "$VENV/.capri-pip-x2"
     UPSCALE=1 pack
     check "$([ "$PRC" = 0 ] && grep -q -- '--index-url https://download.pytorch.org/whl/cpu torch==2.15.0$' "$CALLS" && ! grep -q 'pypi.org' "$CALLS" &&
-        grep -q -- '--no-cache-dir scipy numpy>=1.26,<3 Pillow>=10,<14$' "$CALLS" && [ "$(builds)" = 2 ] && last | grep -q -- "$full --upscale\$" &&
+        grep -qxF -- "pip -m pip install -q --disable-pip-version-check --no-cache-dir --only-binary :all: scipy $art" "$CALLS" && [ "$(builds)" = 2 ] && last | grep -q -- "$full --upscale\$" &&
         [ -d "$PACK/anim/lachy/x2" ] && [[ $(meta pack) == *-1-x1 ]] && echo 0)" \
-        "--upscale: torch 2.15.0 from its CPU index alone, scipy, numpy and Pillow from PyPI, then the full pack with the x2 strips ($(meta pack))"
+        "--upscale: torch 2.15.0 from its CPU index alone, scipy, numpy and Pillow from PyPI (wheels only), then the full pack with the x2 strips ($(meta pack))"
     pack
     check "$([ "$PRC" = 0 ] && [ "$(builds)" = 0 ] && [ -d "$PACK/anim/lachy/x2" ] && said 'as asked last time' && echo 0)" "a plain rerun keeps them: up to date"
     UPSCALE=1 FAIL=upscale pack
@@ -1306,12 +1310,25 @@ SH
         said "the x2 upscale didn't work (make-pack: --upscale: 2 strip(s) differ" && [[ $(meta pack) == *-1-x0 ]] && [ -n "$(meta pack_x2_failed)" ] && echo 0)" \
         "a failed upscale: said, and her pack is the full one without the x2 strips; the install goes on ($(meta pack))"
     pack
-    check "$([ "$PRC" = 0 ] && [ "$(builds)" = 0 ] && said 'the x2 upscale failed last time on these same files' && echo 0)" \
-        "a plain rerun doesn't spend those 45 minutes again on the same files: up to date, said"
+    check "$([ "$PRC" = 0 ] && [ "$(builds)" = 0 ] && said 'the x2 upscale failed last time on these same files: her pack stays without it' &&
+        ! said "with lachy's strips at x2, as asked last time" && echo 0)" \
+        "a plain rerun doesn't spend those 45 minutes again on the same files: up to date, said once (not \"as asked last time\" too)"
+    # Built again without trying x2 (--no-local-art here), the failure stays noted for the next.
+    LOCAL_ART=0 pack
+    pack
+    check "$([ "$PRC" = 0 ] && [ "$(builds)" = 0 ] && ! grep -q -- '--upscale' "$CALLS" && said 'the x2 upscale failed last time on these same files' && echo 0)" \
+        "(and a rebuild that doesn't try x2 keeps that noted)"
     rm -f "$VENV/.capri-pip-x2"
     UPSCALE=1 PIP_FAIL=torch pack
-    check "$([ "$PRC" = 0 ] && ! grep -q -- '--upscale' "$CALLS" && said "pip couldn't install torch==2.15.0 scipy" && [ ! -f "$VENV/.capri-pip-x2" ] && echo 0)" \
-        "torch's pip failing: said, no upscale tried, her pack as it was"
+    check "$([ "$PRC" = 0 ] && ! grep -q -- '--upscale' "$CALLS" && said "pip couldn't install torch==2.15.0 scipy" && [ ! -f "$VENV/.capri-pip-x2" ] &&
+        said 'her pack is built without the x2 upscale (--no-upscale stops asking for it)' && echo 0)" \
+        "torch's pip failing: said, and how to stop asking; no upscale tried, her pack as it was"
+    # Python 3.10 (Ubuntu 22.04's): torch 2.15 has no wheel for it, said.
+    printf 'home = /usr/bin\nversion = 3.10.12\n' >"$VENV/pyvenv.cfg"
+    UPSCALE=1 PIP_FAIL=torch pack
+    check "$([ "$PRC" = 0 ] && said "No matching distribution found for torch; torch 2.15.0 needs Python 3.11 or newer, this venv's is 3.10): her pack is built without the x2 upscale (--no-upscale stops asking for it)" && echo 0)" \
+        "torch's pip failing on Python 3.10: why, and --no-upscale"
+    rm -f "$VENV/pyvenv.cfg"
     forget
     M_pack_upscale=on PIP_FAIL=torch pack
     check "$([ "$PRC" = 0 ] && grep -q 'download.pytorch.org' "$CALLS" && echo 0)" "pack_upscale=on in the manifest: the x2 strips by default"
@@ -1320,18 +1337,19 @@ SH
     # --no-local-art --upscale: the x2 pip brings numpy and Pillow (upscale_art.py's) without mochi's.
     rm -f "$VENV/.capri-pip-x2" "$VENV/.capri-pip-art"
     LOCAL_ART=0 UPSCALE=1 pack
-    check "$([ "$PRC" = 0 ] && grep -q -- '--no-cache-dir scipy numpy>=1.26,<3 Pillow>=10,<14$' "$CALLS" && ! grep -q -- '--mochi' "$CALLS" &&
+    check "$([ "$PRC" = 0 ] && grep -qF -- "--only-binary :all: scipy $art" "$CALLS" && ! grep -q -- '--mochi' "$CALLS" &&
         last | grep -q -- ' --lachy auto --upscale$' && [ -d "$PACK/anim/lachy/x2" ] && [ ! -d "$PACK/anim/mochi" ] && [[ $(meta pack) == *-0-x1 ]] && echo 0)" \
         "--no-local-art --upscale: Pillow and numpy come with torch; lachy's strips at x2, no mochi ($(meta pack))"
     # numpy and Pillow failing: mochi's close-ups as drawn, and the next run tries again.
     forget
     UPSCALE=0 PIP_FAIL=Pillow pack
-    check "$([ "$PRC" = 0 ] && said "pip couldn't install numpy>=1.26,<3 Pillow>=10,<14 (ERROR: No matching distribution found for Pillow): mochi's close-ups keep her hair as drawn" &&
+    check "$([ "$PRC" = 0 ] && said "pip couldn't install $art (ERROR: No matching distribution found for Pillow): mochi's close-ups keep her hair as drawn" &&
         last | grep -q -- "$full --mochi-hair original\$" && [ -d "$PACK/anim/mochi" ] && [[ $(meta pack) == *-1o-x0 ]] && [ ! -f "$VENV/.capri-pip-art" ] && echo 0)" \
         "numpy/Pillow's pip failing: said, mochi's art with her hair as drawn ($(meta pack))"
     UPSCALE=0 pack
-    check "$([ "$PRC" = 0 ] && [ "$(builds)" = 1 ] && last | grep -q -- "$full\$" && [[ $(meta pack) == *-1-x0 ]] && echo 0)" \
-        "and once they install, her hair is repainted ($(meta pack))"
+    check "$([ "$PRC" = 0 ] && [ "$(builds)" = 1 ] && last | grep -q -- "$full\$" && [[ $(meta pack) == *-1-x0 ]] &&
+        grep -qxF -- "pip -m pip install -q --disable-pip-version-check --no-cache-dir --only-binary :all: $art" "$CALLS" && echo 0)" \
+        "and once they install (exact pins, wheels only), her hair is repainted ($(meta pack))"
     # Anything failing with mochi's art: said, and her pack built without it. CapriCore failing fails the install.
     rm -rf "$PACK"
     FAIL=mochi pack
@@ -1343,6 +1361,17 @@ SH
     check "$([ "$PRC" = 0 ] && [ "$(builds)" = 3 ] && last | grep -q -- ' --lachy auto --upscale$' && [ -d "$PACK/anim/lachy/x2" ] && [ ! -d "$PACK/anim/mochi" ] &&
         ! said "the x2 upscale didn't work" && [[ $(meta pack) == *-0-x1 ]] && echo 0)" \
         "mochi's art failing with --upscale: mochi's is dropped, the x2 strips kept ($(meta pack))"
+    # Again (its repo still down), --upscale asked last time: that pack is the one in place already.
+    touch "$PACK/kept"
+    FAIL=mochi pack
+    check "$([ "$PRC" = 0 ] && [ "$(builds)" = 1 ] && [ -e "$PACK/kept" ] && [ -d "$PACK/anim/lachy/x2" ] && [ ! -e "$PACK.new" ] && [[ $(meta pack) == *-0-x1 ]] &&
+        said "her pack with mochi's art didn't work" && said 'her pack without it is in place already and passes her --check: kept' && echo 0)" \
+        "mochi's art failing again, x2 asked last time: the pack in place (no mochi, x2) is kept, not built again (1 make-pack, not 3)"
+    # Its files changed (a new release): built again.
+    echo '#' >>"$LIB/tools/make-pack"
+    FAIL=mochi pack
+    check "$([ "$PRC" = 0 ] && [ "$(builds)" = 3 ] && [ ! -e "$PACK/kept" ] && [ -d "$PACK/anim/lachy/x2" ] && echo 0)" \
+        "(one built from other files is built again)"
     rm -rf "$PACK"
     FAIL=trace UPSCALE=0 pack
     check "$([ "$PRC" = 0 ] && [ "$(builds)" = 2 ] && [ -f "$PACK/sprites.json" ] && [ ! -d "$PACK/anim/mochi" ] &&
@@ -1361,8 +1390,14 @@ SH
     r=$PRC
     check "$([ "$r" != 0 ] && said "make-pack couldn't build her pack" && [ -f "$PACK/old-pack" ] && [ ! -e "$PACK.new" ] && [ "$(builds)" = 2 ] && echo 0)" \
         "CapriCore failing: the install stops (exit $r) after trying without mochi's art, and the pack there stays as it was"
+    # --uninstall: her pack, and the half-made ones beside it (a build stopped part way, never recorded).
+    mkdir -p "$PACK.new" "$PACK.x2" "$PACK.old"
+    CONF=$p/.config STATE=$p/.local/state PURGE=0 PREFIXES=("$p")
+    uninstall >"$p/out" 2>&1
+    check "$([ ! -e "$PACK" ] && [ ! -e "$PACK.new" ] && [ ! -e "$PACK.x2" ] && [ ! -e "$PACK.old" ] && echo 0)" \
+        "--uninstall: her pack goes, and $(tilde "$PACK").new, .x2 and .old with it"
     exit "$fails"
-) || fails=$((fails + $?))
+); fails=$((fails + $?))
 
 if [ "$fails" -gt 0 ]; then
     echo "$fails install.sh unit check(s) failed"

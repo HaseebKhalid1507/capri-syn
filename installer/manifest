@@ -72,8 +72,12 @@ pip_wheel_sha256=f3b60b20ffaadd4415ed7957212a38ac63fa4c5fa375bd0f4a797777940fad1
 # py3-none-any, from PyPI. Bump with pip_pack.
 pip_pack_sha256=8ae1846b0f192fd485d26a455af19b8f5cf05aff08f9836f533913d8fcea133c 3060b8c1fc2329fa20265b7c138614143ea7c1624e26c5c180c76aeb74deae6f
 # mochi's art (on by default; --no-local-art leaves it out): its hair recolour (tools/mochi_hair.py)
-# needs these too.
-pip_local_art=numpy>=1.26,<3 Pillow>=10,<14
+# needs these too, wheels only. Exact pins: numpy 2.5.5 has wheels for Python 3.12 to 3.15, 2.2.6 for
+# 3.10 and 3.11 (pip takes the one its marker picks); Pillow 12.3.0 for 3.10 to 3.15.
+pip_local_art=numpy==2.2.6;python_version<"3.12" numpy==2.5.5;python_version>="3.12" Pillow==12.3.0
+# Their wheels on Windows, by SHA-256 (pip --require-hashes, as pip_pack): numpy 2.5.5's and Pillow
+# 12.3.0's cp313 win_amd64 (python_embed's), from PyPI. Bump with pip_local_art.
+pip_local_art_sha256=e0608d1585557b68dcb6a70a41654f7536567960afad79d91752d2863b242b68 1cca606cd25738df4ed873d5ad46bbdb3d83b5cbca291f6b4ff13a4df6b0bbe8
 # The x2 upscale of lachy's strips (make-pack --upscale, tools/upscale_art.py: Real-ESRGAN on the CPU
 # through torch). pack_upscale is its default, on or off (--upscale / --no-upscale say otherwise, and a
 # rerun keeps what was asked). Off: measured on an i5-13420H (torch 2.15 CPU, 4 threads, nice 19),
