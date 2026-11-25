@@ -137,7 +137,8 @@ cargo-about, `installer/licenses/`).
   torch's CPU build, ~175 MB more, then about 45 min of CPU); "Use a pack folder I already have"
   (copied; a folder without `sprites.json` is refused); or "Skip, I'll add one later". The download is
   the one install.ps1 does: CPython's embeddable package and pip (pinned, SHA-256 checked) in a cache
-  folder, fonttools, numpy and Pillow into it, CapriCore at `capricore_commit` from codeload, then
+  folder, fonttools, numpy and Pillow into it (exact versions, by their wheels' SHA-256: `pip_pack`,
+  `pip_local_art` and their `_sha256`), CapriCore at `capricore_commit` from codeload, then
   `tools/make-pack --lachy auto --mochi auto` (`steps.ps1 pack`; `-NoLocalArt` without mochi's,
   `-Upscale` with the x2 strips), every file checked against `tools/*.sha256`, and her `--check` on
   the result, before it replaces the pack there. The extras never fail the step: without numpy and
@@ -147,8 +148,9 @@ cargo-about, `installer/licenses/`).
   `steps.ps1 pack` without a switch). Nothing of his is used or
   changed: not his Python, not his PATH. lachy's and mochi's notices (licence, `Required Notice:`
   lines) are shown on the finish page. Her art is never in the installer: it's downloaded onto his
-  PC from the repositories that publish it (lachydotmcg/capri-desktop, mochiiwuff/capri-desktop); the
-  art files are not in capri-syn's repository, and its terms are in the pack's `NOTICE.md`.
+  PC from the repositories that publish it (CapriChooms/CapriCore, lachydotmcg/capri-desktop,
+  mochiiwuff/capri-desktop); the art files are not in capri-syn's repository, and its terms are in
+  the pack's `NOTICE.md`.
 - **Upgrades:** a pack the steps made (it holds `.capri-syn-pack`) is replaced whole, or left as it
   is when it was built from the same inputs; any other pack (his) is moved to
   `capri.pre-install-<date>`, never deleted.

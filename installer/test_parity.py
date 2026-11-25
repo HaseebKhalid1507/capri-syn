@@ -77,6 +77,45 @@ class Parity(unittest.TestCase):
                   "mochi_hair.py", "upscale_art.py", "desktop-art.json", "capricore-outfit.json"):
             self.assertTrue(f'Source: "..\\..\\tools\\{f}"; DestDir: "{{app}}\\steps\\tools"' in iss, f"her installer has no tools\\{f}")
 
+    def test_her_installer_notes_only_what_he_changed(self):
+        # The pack page's boxes start as the last download was asked (else the defaults): a box left as it
+        # was gives steps.ps1 no flag (a default noted as his choice would stick), one he changed (or that
+        # /LOCALART= or /UPSCALE= set) does.
+        iss = (ROOT / "packaging/windows/synaps-avatar.iss").read_text(encoding="utf-8")
+        page = block(iss, "procedure CreatePackPage;", "\nend;\n")
+        self.assertLess(page.index("UpscaleBox.Checked := "), page.index("MochiStart := MochiBox.Checked;"))
+        self.assertIn("UpscaleStart := UpscaleBox.Checked;", page)
+        flags_fn = block(iss, "function PackFlags: String;", "\nend;")
+        for box, start, param, on, off in (("MochiBox", "MochiStart", "LOCALART", "-LocalArt", "-NoLocalArt"),
+                                           ("UpscaleBox", "UpscaleStart", "UPSCALE", "-Upscale", "-NoUpscale")):
+            guard = f"if ({box}.Checked <> {start}) or ParamOn('{param}') or ParamOff('{param}') then begin"
+            self.assertIn(guard, flags_fn)
+            said = block(flags_fn, guard, "end;")
+            self.assertIn(f"' {on}'", said)
+            self.assertIn(f"' {off}'", said)
+            self.assertEqual(flags_fn.count(f"' {on}'"), 1, f"PackFlags sends {on} only behind its guard")
+
+    def test_mochis_pip_is_pinned(self):
+        # numpy and Pillow (mochi's hair recolour): exact versions (a marker may pick one by Python), wheels
+        # only on Linux, by their wheels' SHA-256 on Windows (as pip_pack).
+        art = re.search(r"^pip_local_art=(.*)$", MANIFEST, re.M).group(1).split()
+        hashes = re.search(r"^pip_local_art_sha256=(.*)$", MANIFEST, re.M).group(1).split()
+        names = set()
+        for req in art:
+            self.assertRegex(req, r'^[A-Za-z0-9_.-]+==[0-9][0-9a-z.]*(;python_version(<|>=|==)"3\.[0-9]+")?$', req)
+            names.add(req.split("==")[0].lower())
+        self.assertEqual(names, {"numpy", "pillow"})
+        self.assertEqual(len(hashes), len(names), "one cp313 win_amd64 wheel's hash for each")
+        for h in hashes:
+            self.assertRegex(h, r"^[0-9a-f]{64}$")
+        pack = block(SH, "step_pack() {", "\n}\n")
+        self.assertIn('"${pipx[@]}" --only-binary :all: "${art[@]}"', pack)
+        self.assertIn('"${pipx[@]}" --only-binary :all: "${rest[@]}"', pack)
+        steps = block(STEPS.read_text(encoding="utf-8"), "function Build-Pack", "\n}\n")
+        self.assertIn("$artHashes = @(\"$($script:M['pip_local_art_sha256'])\"", steps)
+        self.assertIn("(Add-Pip $py $art '.capri-art' \"mochi's hair recolour\" $artHashes)", steps)
+        self.assertIn("'--require-hashes'", block(STEPS.read_text(encoding="utf-8"), "function Add-Pip", "\n}\n"))
+
     def test_every_flag_is_parsed(self):
         sh_args = block(SH, "args() {", "\n}\n")
         ps_args = block(PS, "function Read-Flags", "\n}\n")

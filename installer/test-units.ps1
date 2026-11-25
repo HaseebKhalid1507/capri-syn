@@ -1,6 +1,6 @@
 # install.ps1's path guard and recorded folders on their own, on real Windows paths (CI's
-# windows-installer job); and steps.ps1's Set-Pack, when the new pack can't go in, and Build-Pack on
-# stand-ins. Their functions are loaded from the scripts' syntax trees: nothing runs.
+# windows-installer job); and steps.ps1's Set-Pack, when the new pack can't go in, Build-Pack on
+# stand-ins, and Remove-HerPack. Their functions are loaded from the scripts' syntax trees: nothing runs.
 #
 #   .\installer\test-units.ps1
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '', Justification = 'install.ps1''s own functions print with it.')]
@@ -194,14 +194,15 @@ foreach ($case in @(@{ Name = 'his own pack'; Theirs = $false }, @{ Name = 'a pa
 # by default; the extras never fail the step (anything failing with mochi's art: built without it;
 # a failed upscale: without the x2 strips; numpy and Pillow failing: her hair as drawn); her --check
 # on the new pack before it goes in; a rerun does as the last one was asked.
-foreach ($name in 'Build-Pack', 'Get-Marked', 'Invoke-Pack', 'Test-Built', 'Add-Torch', 'Show-Notices', 'Result') {
+foreach ($name in 'Build-Pack', 'Get-Marked', 'Invoke-Pack', 'Test-Built', 'Add-Torch', 'Show-Notices', 'Result', 'Clear-PackCache', 'Remove-HerPack') {
     $fn = $stepsAst.Find({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name }, $true)
     . ([scriptblock]::Create($fn.Extent.Text))
 }
 $script:Root = Join-Path $tmp 'root'
 New-Item -ItemType Directory -Force (Join-Path $script:Root 'tools') | Out-Null
 Set-Content -LiteralPath (Join-Path $script:Root 'tools\upscale_art.py') -Value '#'
-$script:M = @{ pip_pack = 'fonttools==4.65.0'; pip_local_art = 'numpy>=1.26,<3 Pillow>=10,<14'; pip_upscale = 'torch==2.15.0 scipy'; pack_upscale = 'off'
+$art = 'numpy==2.2.6;python_version<"3.12" numpy==2.5.5;python_version>="3.12" Pillow==12.3.0'
+$script:M = @{ pip_pack = 'fonttools==4.65.0'; pip_local_art = $art; pip_local_art_sha256 = "$('a' * 64) $('b' * 64)"; pip_upscale = 'torch==2.15.0 scipy'; pack_upscale = 'off'
     capricore_commit = 'bc93892c751a73fdce14355b477dcdc775e46fd9'; python_embed = '3.13.17' }
 $script:Cache = Join-Path $tmp 'cache'
 $script:Exe = 'synaps-avatar.exe'
@@ -212,8 +213,8 @@ function Get-Python { 'python.exe' }
 function Get-CapriCore { $d = Join-Path $tmp 'CapriCore-bc93892'; New-Item -ItemType Directory -Force $d | Out-Null; $d }
 function Get-Key([string]$Key) { $script:M[$Key] }
 function Get-Fingerprint([bool]$Mochi, [bool]$X2, [string]$Hair = 'red') { "fp-$([int]$Mochi)-$([int]$X2)-$Hair" }
-function Add-Pip([string]$Py, [string[]]$Want, [string]$Note, [string]$What) {
-    $script:Calls.Add("pip $($Want -join ' ') ($Note)")
+function Add-Pip([string]$Py, [string[]]$Want, [string]$Note, [string]$What, [string[]]$Hashes = @()) {
+    $script:Calls.Add("pip $($Want -join ' ') ($Note$(if ($Hashes) { ", $($Hashes.Count) hashes" }))")
     if ($script:PipFail -and ($Want -join ' ') -like "*$($script:PipFail)*") { Warn "pip couldn't install $($Want -join ' ') for $What ($Py)"; return $false }
     $true
 }
@@ -259,6 +260,7 @@ if (Test-Path -LiteralPath $packs) { Remove-Item -Recurse -Force -LiteralPath $p
 
 Invoke-Build
 Check ((Get-Built) -join '|' -eq $full -and (Test-Has 'anim\mochi') -and -not (Test-Has 'anim\lachy\x2') -and (Get-Marked 'fingerprint') -eq 'fp-1-0-red') "Build-Pack, the default: one make-pack, lachy's and mochi's art, no x2 ($((Get-Built) -join '|'))"
+Check ($script:Calls -contains "pip $art (.capri-art, 2 hashes)") "Build-Pack: numpy and Pillow at their pins, by their wheels' hashes ($($script:Calls -like 'pip *'))"
 Check ($said -like "*from the repositories that publish it (lachydotmcg/capri-desktop, mochiiwuff/capri-desktop); the art files are not in capri-syn's repository*" -and
     $said -like '*its README ("Credits and rights"): Its rights paragraph.*' -and $said -like '*Required Notice: Copyright (c) 2026 mochiiwuff*' -and $said -notmatch 'redistribut|PERSONAL USE') "Build-Pack: where the art came from, mochi's README's own words, each Required Notice"
 Invoke-Build
@@ -275,7 +277,7 @@ Set-Content -LiteralPath (Join-Path $Out $script:Marker) -Value @('source=downlo
 Invoke-Build
 Check ((Get-Built) -join '|' -eq $full -and (Test-Has 'anim\mochi')) "Build-Pack: an older lean pack, rerun with the defaults: the full pack"
 Invoke-Build @('Upscale')
-Check (($script:Calls -contains 'pip torch==2.15.0 scipy numpy>=1.26,<3 Pillow>=10,<14 (.capri-x2)') -and (Get-Built) -join '|' -eq "$full|$full --upscale" -and (Test-Has 'anim\lachy\x2') -and
+Check (($script:Calls -contains "pip torch==2.15.0 scipy $art (.capri-x2)") -and (Get-Built) -join '|' -eq "$full|$full --upscale" -and (Test-Has 'anim\lachy\x2') -and
     (Get-Marked 'fingerprint') -eq 'fp-1-1-red') "Build-Pack -Upscale: torch 2.15.0, scipy, numpy and Pillow; the full pack, then again with x2 ($((Get-Built) -join '|'))"
 Invoke-Build
 Check ((Get-Built).Count -eq 0 -and (Test-Has 'anim\lachy\x2') -and $said -like '*as asked last time*') 'Build-Pack, a plain rerun: keeps the x2 strips, up to date'
@@ -284,11 +286,18 @@ Invoke-Build @('Upscale') -Fail upscale
 Check ((Get-Built).Count -eq 2 -and (Test-Has 'anim\mochi') -and -not (Test-Has 'anim\lachy\x2') -and -not (Test-Path -LiteralPath "$Out.x2") -and $said -like "*the x2 upscale didn't work (make-pack: --upscale: 2 strip(s) differ*" -and
     (Get-Marked 'x2failed') -eq 'fp-0-1-red' -and $said -notlike '*thrown*') "Build-Pack -Upscale, a failed upscale: said, the full pack without x2 ($(Get-Marked 'fingerprint'))"
 Invoke-Build
-Check ((Get-Built).Count -eq 0 -and $said -like '*the x2 upscale failed last time on these same files*') "Build-Pack, a plain rerun: those 45 minutes aren't spent again on the same files"
+Check ((Get-Built).Count -eq 0 -and $said -like '*the x2 upscale failed last time on these same files*' -and $said -notlike '*as asked last time*') "Build-Pack, a plain rerun: those 45 minutes aren't spent again on the same files (said once)"
+# Built again without trying x2 (-NoLocalArt), the failure stays noted for the next.
+Invoke-Build @('NoLocalArt')
+Check ((Get-Built) -join '|' -eq 'make-pack --lachy auto' -and (Get-Marked 'x2failed') -eq 'fp-0-1-red') "Build-Pack, a rebuild that doesn't try x2: x2failed= kept ($(Get-Marked 'x2failed'))"
+Invoke-Build
+Check ((Get-Built).Count -eq 0 -and $said -like '*the x2 upscale failed last time on these same files*') 'Build-Pack, and the next plain rerun: still not again'
+Invoke-Build @('LocalArt')
 Invoke-Build @('Upscale') -PipFail torch
-Check ((Get-Built).Count -eq 0 -and $said -like '*her pack is built without the x2 upscale*' -and $said -notlike '*thrown*') "Build-Pack -Upscale, torch's pip failing: said, her pack as it was"
+Check ((Get-Built).Count -eq 0 -and $said -like '*her pack is built without the x2 upscale (-NoUpscale stops asking for it)*' -and $said -notlike '*thrown*' -and
+    ($script:Calls -contains "pip torch==2.15.0 scipy $art (.capri-x2)")) "Build-Pack -Upscale, torch's pip failing: said, her pack as it was"
 Invoke-Build @('NoLocalArt', 'Upscale')
-Check (($script:Calls -contains 'pip torch==2.15.0 scipy numpy>=1.26,<3 Pillow>=10,<14 (.capri-x2)') -and -not ($script:Calls -like '*(.capri-art)') -and
+Check (($script:Calls -contains "pip torch==2.15.0 scipy $art (.capri-x2)") -and -not ($script:Calls -like '*(.capri-art*') -and
     (Get-Built) -join '|' -eq 'make-pack --lachy auto|make-pack --lachy auto --upscale' -and (Test-Has 'anim\lachy\x2') -and -not (Test-Has 'anim\mochi')) "Build-Pack -NoLocalArt -Upscale: numpy and Pillow come with torch; x2, no mochi"
 Invoke-Build @('LocalArt', 'NoUpscale') -PipFail Pillow
 Check ((Get-Built) -join '|' -eq "$full --mochi-hair original" -and (Test-Has 'anim\mochi') -and (Get-Marked 'fingerprint') -eq 'fp-1-0-original' -and
@@ -301,14 +310,62 @@ Remove-Item -Recurse -Force -LiteralPath $Out
 Invoke-Build @('Upscale') -Fail mochi
 Check ((Get-Built) -join '|' -eq "$full|make-pack --lachy auto|make-pack --lachy auto --upscale" -and (Test-Has 'anim\lachy\x2') -and -not (Test-Has 'anim\mochi') -and
     $said -notlike "*the x2 upscale didn't work*") "Build-Pack -Upscale, mochi's art failing: mochi's dropped, the x2 strips kept"
+# Again (its repo still down), x2 asked last time: that pack is the one there already.
+Set-Content -LiteralPath (Join-Path $Out 'kept') -Value 'x'
+Invoke-Build -Fail mochi
+Check ((Get-Built) -join '|' -eq $full -and (Test-Has 'kept') -and (Test-Has 'anim\lachy\x2') -and -not (Test-Path -LiteralPath "$Out.new") -and
+    $said -like "*her pack with mochi's art didn't work*" -and $said -like '*up to date*' -and $said -notlike '*thrown*') "Build-Pack, mochi's art failing again, x2 asked last time: the pack there (no mochi, x2) is kept, not built again (1 make-pack, not 3)"
+Invoke-Build @('LocalArt', 'NoUpscale') -Fail mochi
+Check ((Get-Built) -join '|' -eq "$full|make-pack --lachy auto" -and -not (Test-Has 'kept') -and -not (Test-Has 'anim\lachy\x2')) "Build-Pack, (one built otherwise, here with x2: built again)"
+Remove-Item -Recurse -Force -LiteralPath $Out
 Invoke-Build @('LocalArt', 'NoUpscale') -Fail trace
 Check ((Get-Built).Count -eq 2 -and -not (Test-Has 'anim\mochi') -and $said -like "*her pack with mochi's art didn't work (KeyError: 'intro-wave1.webp')*") "Build-Pack, a traceback in mochi's path: its error said, built without it"
+Invoke-Build
+Check ((Get-Built) -join '|' -eq $full -and (Test-Has 'anim\mochi')) 'Build-Pack, (and the next run has it again)'
 Set-Content -LiteralPath (Join-Path $Out 'old-pack') -Value 'x'
 Invoke-Build @('LocalArt') -CheckFail
 Check ((Get-Built).Count -eq 2 -and -not (Test-Has 'anim\mochi') -and -not (Test-Has 'old-pack') -and $said -like "*her pack with mochi's art didn't work (it doesn't pass her --check (exit 1): pack: anim/mochi*") "Build-Pack: her --check on the new pack before it goes in; failing with mochi's art, the pack without it goes in"
 Set-Content -LiteralPath (Join-Path $Out 'old-pack') -Value 'x'
 Invoke-Build @('Upscale') -Fail all
 Check ($said -like "*thrown: step: CapriCore's files don't match their pins*" -and (Test-Has 'old-pack') -and -not (Test-Path -LiteralPath "$Out.new") -and (Get-Built).Count -eq 2) "Build-Pack, CapriCore failing: the step fails after trying without mochi's art, the pack there as it was"
+
+# steps.ps1 remove's pack: hers (marked) goes, his stays; the half-made ones beside it go either way.
+foreach ($theirs in $true, $false) {
+    foreach ($d in $Out, "$Out.new", "$Out.x2", "$Out.old") { New-Item -ItemType Directory -Force $d | Out-Null }
+    if ($theirs) { Set-Content -LiteralPath (Join-Path $Out $script:Marker) -Value 'source=download' } else { Remove-Item -Force -LiteralPath (Join-Path $Out $script:Marker) -ErrorAction SilentlyContinue }
+    $null = Remove-HerPack 6>&1
+    Check (((Test-Path -LiteralPath $Out) -ne $theirs) -and -not (Test-Path -LiteralPath "$Out.new") -and -not (Test-Path -LiteralPath "$Out.x2") -and -not (Test-Path -LiteralPath "$Out.old")) "Remove-HerPack, $(if ($theirs) { 'hers: gone' } else { 'his: kept' }), and $Out.new, .x2, .old gone"
+}
+
+# steps.ps1's own Get-Fingerprint (the one above is a stand-in): the manifest's pip pins in it, numpy's
+# and Pillow's when mochi's art or the x2 strips use them.
+$fpText = $stepsAst.Find({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Get-Fingerprint' }, $true).Extent.Text
+$fp = { param([bool]$Mochi, [bool]$X2) & { param($m, $x) . ([scriptblock]::Create($fpText)); function Get-Sha256 { 'x' }; Get-Fingerprint $m $x } $Mochi $X2 }
+$before = @((& $fp $false $false), (& $fp $true $false), (& $fp $false $true))
+$was = $script:M['pip_local_art']
+$script:M['pip_local_art'] = 'numpy==9.9.9 Pillow==9.9.9'
+$after = @((& $fp $false $false), (& $fp $true $false), (& $fp $false $true))
+$script:M['pip_local_art'] = $was
+Check ($before[0] -match '^[0-9a-f]{16}$' -and $before[0] -eq $after[0] -and $before[1] -ne $after[1] -and $before[2] -ne $after[2]) "Get-Fingerprint: numpy and Pillow's pins in it with mochi's art or x2, not in the lean pack's ($($before -join ' ') / $($after -join ' '))"
+
+# install.ps1's summary line for her pack in a dry run: as asked, else as the last run was (its pack's
+# marker, choice=), else the defaults.
+$script:Dry = $true
+$script:Pack = Join-Path $tmp 'how\capri'
+New-Item -ItemType Directory -Force $script:Pack | Out-Null
+foreach ($c in @(
+        @('', '', $null, 'capri (CapriCore v1.0.4 + lachy + mochi)'),
+        @('', '', 'choice=mochi=0 x2=1', 'capri (CapriCore v1.0.4 + lachy, x2 strips)'),
+        @('on', '', 'choice=mochi=0 x2=1', 'capri (CapriCore v1.0.4 + lachy + mochi, x2 strips)'),
+        @('', 'off', 'choice=mochi=0 x2=1', 'capri (CapriCore v1.0.4 + lachy)'),
+        @('', '', 'choice=mochi=- x2=-', 'capri (CapriCore v1.0.4 + lachy + mochi)'))) {
+    $script:LocalArt = $c[0]; $script:Upscale = $c[1]
+    $mark = Join-Path $script:Pack '.capri-syn-pack'
+    if ($c[2]) { Set-Content -LiteralPath $mark -Value @('source=download', 'fingerprint=x', $c[2]) } else { Remove-Item -Force -LiteralPath $mark -ErrorAction SilentlyContinue }
+    $got = Get-PackHow
+    Check ($got -eq $c[3]) "Get-PackHow, a dry run (LocalArt '$($c[0])', Upscale '$($c[1])', $(if ($c[2]) { $c[2] } else { 'no marker' })): $got"
+}
+$script:Dry = $false
 
 Remove-Item -Recurse -Force -LiteralPath $tmp
 if ($fails.Count) { throw "$($fails.Count) check(s) failed: $($fails -join '; ')" }

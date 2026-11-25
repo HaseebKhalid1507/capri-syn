@@ -1031,10 +1031,14 @@ function Write-SynapsStays([string]$Mine, [string]$PathEdit, [string]$Rustup) {
     if ($Rustup) { Write-Info 'rustup stays too (this installed it for her build): `rustup self uninstall` removes it' }
 }
 
-# What her pack holds, for the summary: as built (a dry run: as asked).
+# What her pack holds, for the summary: as built (a dry run: as asked, else as the last run was, its
+# pack's marker's choice=, else the defaults).
 function Get-PackHow {
-    $mochi = $script:LocalArt -ne 'off'
-    $x2 = $script:Upscale -eq 'on' -or (-not $script:Upscale -and $script:M.pack_upscale -eq 'on')
+    $last = ''
+    $mark = Join-Path $script:Pack '.capri-syn-pack'
+    if (Test-Path -LiteralPath $mark) { $last = " $(@(Get-Content -LiteralPath $mark | Where-Object { $_ -like 'choice=*' } | Select-Object -Last 1) -replace '^choice=') " }
+    $mochi = if ($script:LocalArt) { $script:LocalArt -eq 'on' } else { $last -notlike '* mochi=0 *' }
+    $x2 = if ($script:Upscale) { $script:Upscale -eq 'on' } elseif ($last -like '* x2=1 *') { $true } elseif ($last -like '* x2=0 *') { $false } else { $script:M.pack_upscale -eq 'on' }
     if (-not $script:Dry -and (Test-Path -LiteralPath (Join-Path $script:Pack 'sprites.json'))) {
         $mochi = Test-Path -LiteralPath (Join-Path $script:Pack 'anim\mochi')
         $x2 = Test-Path -LiteralPath (Join-Path $script:Pack 'anim\lachy\x2')

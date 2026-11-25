@@ -256,6 +256,12 @@ Get-Shot 'finish' -Title 'Setup - capri-syn*'
 Write-StepTime
 Check (($t -match 'Synaps \d+\.\d+\.\d+, her brain: installed').Count -gt 0) 'the finish page: Synaps installed'
 Check (($t -match 'Her art: downloaded, built and checked').Count -gt 0) 'the finish page: her art'
+# /LOCALART=off is his choice, noted; the x2 box, left as it was, gives no flag and isn't.
+$setupLog = Get-Content -Raw -LiteralPath $log -ErrorAction SilentlyContinue
+$packArgs = [regex]::Match("$setupLog", '(?m)^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\S*\s+step pack: (?!exit )(.*?)\r?$').Groups[1].Value
+Check ($packArgs -eq 'pack -NoLocalArt') "the pack step: steps.ps1 $packArgs"
+$choice = @(Get-Content -LiteralPath (Join-Path $env:LOCALAPPDATA 'synaps-avatar\packs\capri\.capri-syn-pack') -ErrorAction SilentlyContinue | Where-Object { $_ -like 'choice=*' })
+Check ($choice -contains 'choice=mochi=0 x2=-') "and its marker notes /LOCALART=off, nothing for x2: $choice"
 Check (($t -match 'Its daemon runs').Count -gt 0) 'the finish page: the daemon'
 # An account: her model is set once he's signed in (the finish page's step), never before.
 $m1 = Get-HerModel

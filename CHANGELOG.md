@@ -20,14 +20,17 @@
   it replaces the old, on Linux too) is said and her pack is built without it; a failed upscale (or its
   pip) is said and her pack is built without the x2 strips, which a plain rerun doesn't retry on the
   same files. A rerun keeps what was asked last time (`--no-local-art`, `--upscale`; her Windows
-  installer's boxes start that way); `/LOCALART=` and `/UPSCALE=` take `0`/`no`/`false` and
-  `1`/`yes`/`true` too. Her Windows installer now carries mochi's pins and `tools/mochi_hair.py`, and
+  installer's boxes start that way, and only a box changed there is noted as asked); mochi's art
+  failing again with the pack without it in place keeps that pack, not built again. `/LOCALART=` and
+  `/UPSCALE=` take `0`/`no`/`false` and `1`/`yes`/`true` too. numpy and Pillow are pinned (numpy
+  2.5.5, 2.2.6 on Python 3.10 and 3.11; Pillow 12.3.0), wheels only, and on Windows by their SHA-256
+  as fonttools is. Her Windows installer now carries mochi's pins and `tools/mochi_hair.py`, and
   both installers `tools/upscale_art.py` and its pins.
 - **What the installers say about her art** is what's true: it's downloaded onto your machine from
-  the repositories that publish it (lachydotmcg/capri-desktop, mochiiwuff/capri-desktop), and the art
-  files are not in capri-syn's repository. lachy's desktop art is under PolyForm Noncommercial 1.0.0;
-  mochi's repository's licence (the same) is for its code, and its README's "Credits and rights" is
-  quoted for its images. The "local personal use only" warnings are gone from the prompts, the logs
+  the repositories that publish it (CapriChooms/CapriCore, lachydotmcg/capri-desktop,
+  mochiiwuff/capri-desktop), and the art files are not in capri-syn's repository. lachy's desktop art
+  is under PolyForm Noncommercial 1.0.0; mochi's repository's licence (the same) is for its code, and
+  its README's "Credits and rights" is quoted for its images. The "local personal use only" warnings are gone from the prompts, the logs
   and the pack's `NOTICE.md`, which keeps every Required Notice line.
 
 - **Hyprland Lua summon bindings**: the installer prefers `hyprland.lua`, writes Lua press/release
