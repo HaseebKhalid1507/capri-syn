@@ -1260,7 +1260,7 @@ SH
     chmod +x "$VENV/bin/python" "$BIN/synaps-avatar"
     export CALLS=$p/calls
     # One step_pack: its output in $p/out, its make-pack and pip runs in $p/calls, its exit code in PRC.
-    pack() { : >"$CALLS"; (step_pack) >"$p/out" 2>&1; PRC=$?; }
+    pack() { : >"$CALLS"; (set -e; step_pack) >"$p/out" 2>&1; PRC=$?; }
     builds() { grep -c '^make-pack ' "$CALLS"; }
     last() { grep '^make-pack ' "$CALLS" | tail -n1; }
     said() { grep -qF -- "$1" "$p/out"; }
@@ -1397,7 +1397,7 @@ SH
     check "$([ ! -e "$PACK" ] && [ ! -e "$PACK.new" ] && [ ! -e "$PACK.x2" ] && [ ! -e "$PACK.old" ] && echo 0)" \
         "--uninstall: her pack goes, and $(tilde "$PACK").new, .x2 and .old with it"
     exit "$fails"
-) || fails=$((fails + $?))
+); fails=$((fails + $?))
 
 if [ "$fails" -gt 0 ]; then
     echo "$fails install.sh unit check(s) failed"

@@ -930,7 +930,7 @@ step_pack() {
             else
                 # torch 2.15 has no wheel for Python 3.10 (Ubuntu 22.04's): said, and how to stop asking.
                 local pyv
-                pyv=$(sed -n 's/^version *= *\([0-9]*\.[0-9]*\).*/\1/p' "$VENV/pyvenv.cfg" 2>/dev/null | head -n1)
+                pyv=$(sed -n 's/^version *= *\([0-9]*\.[0-9]*\).*/\1/p' "$VENV/pyvenv.cfg" 2>/dev/null | head -n1 || true)
                 case ${#torch[@]}:$pyv in 0:* | *:) pyv='' ;; *:3.[0-9] | *:3.10) pyv="; ${torch[*]/==/ } needs Python 3.11 or newer, this venv's is $pyv" ;; *) pyv='' ;; esac
                 warn "pip couldn't install ${up[*]} ${art[*]} ($(pip_why "$CACHE/pip-x2.log")$pyv): her pack is built without the x2 upscale (--no-upscale stops asking for it)"
                 x2=0
