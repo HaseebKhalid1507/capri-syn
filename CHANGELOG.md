@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 1.3.0 (2026-11-24)
+
+Her installers build her full pack by default: mochi's intro close-ups, cut-ins and faces come with
+every install, and lachy's strips at x2 are an install option. On Hyprland she sits on windows under
+caelestia again, picks the compositor's GPU, takes Lua summon bindings, and a drag let go on another
+monitor lets her go there.
+
+### Her art
 - **The installers build her full pack by default.** mochi's art (her intro close-ups, the cut-ins and
   the Line's faces, her hair repainted red) now comes with CapriCore and lachy's on every install path:
   `install.sh`, `install.ps1`, her Windows installer's "Download her art" (a box under it, ticked) and
@@ -33,11 +41,11 @@
   its README's "Credits and rights" is quoted for its images. The "local personal use only" warnings are gone from the prompts, the logs
   and the pack's `NOTICE.md`, which keeps every Required Notice line.
 
+### Hyprland
 - **Hyprland Lua summon bindings**: the installer prefers `hyprland.lua`, writes Lua press/release
   bindings and tags them so live collision checks keep the same key on reinstall. The optional
   mic toggle is checked too; occupied chords fall back together to Super+Alt+C / Super+Alt+Ctrl+C.
   Offline helpers and aliases require manual setup rather than guessing that a key is free.
-
 - **Hyprland: she sits on windows again under shells that draw on one full-screen layer** (caelestia,
   some quickshell setups). `perch sit` / `perch stand`, her flights and drag snaps used to end in
   `edge hidden … exposed []`: the shell's transparent full-output layer counted as covering every
@@ -50,7 +58,6 @@
   open instead of reporting no compatible adapter (not yet run on XWayland with NVIDIA). Single-GPU Wayland is also pinned to the
   compositor's GPU, but its Vulkan driver list is left unchanged; vendor narrowing is only
   for multi-GPU machines. Native X11 keeps its boot-VGA workaround.
-
 - **Hyprland: a drag let go on the other monitor lets her go there** (she falls, lands on a window or
   is thrown, as on one monitor) instead of hanging held for good. With no window focused she also used
   to slip out of your hand at the monitor edge; now she stays held to the release, as with one focused:
@@ -64,6 +71,44 @@
   the keyboard, so she was let go mid-drag. Now the Line (or the reader, or her talk field) takes the
   keyboard when you let go of her, also when it was still opening as you grabbed her. Closing a Line
   that has the keyboard while you hold her (a Mod+C tap) still lets her go there.
+
+### Known issues
+- A dark slab on X11 without a compositor (#72): now and then her whole window's rectangle paints solid
+  black behind her and her bubble, covering what's under it, more often while a prompt hangs below her. So
+  far only seen with no compositor, where she cuts her window to her outline with the X shape. Workaround
+  (likely; not yet confirmed): run a compositor (picom: `picom -b`); with `[display] composited = "auto"`,
+  the default, she switches to alpha when it starts, no restart.
+- GNOME, KDE and sway run her through XWayland, with its limits (docs/INSTALL.md). None of them has been
+  tried on a real session yet: CI and the test containers stand in for them.
+- Hyprland has no idle time for her yet: your presence is the pointer moving, so typing alone for 5 min
+  reads as away. Hyprland before 0.40 isn't supported: she takes XWayland there.
+- Hyprland: the Line and Settings can open cut short, with no room to type (#145). Being looked at.
+- On Windows, Synaps 0.12's own `synaps login` opens a sign-in tab cut at the URL's first `&`: copy the
+  whole URL it prints into your browser, or sign in from her (Settings ▸ Brain) or through her installers'
+  step, which open it whole (docs/INSTALL.md has the command). Grok's sign-in never prints its URL, so
+  Grok can't be signed in on Windows yet.
+- Windows: the installers are unsigned, so a browser download meets SmartScreen ("More info", then "Run
+  anyway"). Windows 10 and Windows 11 on Arm are untested. A click on one of her notifications does
+  nothing (as on Linux). Her voice brings its own VC++ runtime but hasn't yet run on a PC without the
+  Visual C++ Redistributable. Live audio is still to check on real hardware: her desktop checks ran in a
+  Windows 11 VM, with no real audio.
+- Linux has no tray icon yet: HIDE's chip is the way back there.
+- Her taskbar button's name, for a screen reader (Windows): on a first run, Explorer can name her button
+  with her old tooltip followed by the current one, so a screen reader hears both
+  (`capri-syn · SPEAKING capri-syn · ONLINE`). Her tooltip is one string, and the hover popup shows the
+  current one alone: the name chains after a tooltip change.
+- Windows: her context doesn't roll over yet. Synaps 0.12 keeps its context archive on Linux and macOS
+  only, so `[session] rollover` (docs/REFERENCE.md) is skipped there (her log says so). A long chat fills
+  her model's context until a turn is refused as too long; then compact or clear it from Synaps
+  (`/compact` or `/clear` in `synaps --attach capri`).
+- A ChatGPT account without Codex (coding) access reads as AT THE LIMIT: Synaps 0.12 words its refusal as
+  the same 429 Too Many Requests a rate limit gets, so she can't tell them apart. If it never clears, pick
+  another brain in Settings ▸ Brain.
+- With `XDG_RUNTIME_DIR` unset, she and her voice sidecar look for the Linux socket in different places:
+  she in the temp dir (`$TMPDIR`, else `/tmp`), the sidecar in `/run/user/<uid>`. Set it, or set
+  `CAPRI_VOICE_SOCK` for both. It isn't aligned yet because that would change how she behaves.
+- A word streamed in pieces can leave the bubble a step too wide until the reply ends, and the half-typed
+  word drops a line. Nothing is cut (#146).
 
 ## 1.2.0 (2026-11-23)
 
