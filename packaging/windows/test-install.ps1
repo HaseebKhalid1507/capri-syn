@@ -225,7 +225,8 @@ $deadline = (Get-Date).AddSeconds(90)
 while ((Test-Path (Join-Path $app 'unins000.exe')) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 500 }
 Start-Sleep -Seconds 2
 Check ($ucode -eq 0) "uninstalls unattended (exit $ucode)"
-Check (-not (Test-Path $app)) "$app is gone"
+$leftApp = @(Get-ChildItem -Recurse -Force $app -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
+Check (-not (Test-Path $app)) "$app is gone$(if ($leftApp) { ': ' + ($leftApp -join ', ') })"
 # His pack (moved aside) stays, and so does packs\, its folder.
 $left = @(Get-ChildItem -Recurse -Force $data -ErrorAction SilentlyContinue | Where-Object { $_.FullName -notlike "$($aside[0])*" -and $_.FullName -ne (Split-Path -Parent $packTo) } | ForEach-Object { $_.FullName })
 Check ($left.Count -eq 0) "nothing of hers is left in $data (pack, log, state, cache)$(if ($left) { ': ' + ($left -join ', ') })"

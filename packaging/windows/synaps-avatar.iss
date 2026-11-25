@@ -8,7 +8,12 @@
 ;     page installs the Synaps she's pinned to (installer/manifest: synaps_pin, a release she was run
 ;     against; never the latest) with its own installer, checked against its pinned SHA-256.
 ;   - Her pack: the "Her pack" page downloads her art and builds it on his machine (the default), copies
-;     a pack folder he has, or skips. Her art is never in this installer.
+;     a pack folder he has, or skips. The download is the full pack: CapriCore, lachy's desktop art and
+;     mochi's (its box, ticked; /LOCALART=off unticks it); lachy's strips at x2 with its box (unticked:
+;     installer/manifest's pack_upscale; /UPSCALE=on ticks it). A rerun's boxes start as the last
+;     download's were (the pack's marker). Her art is never in this installer: it's downloaded onto his
+;     machine from the repositories that publish it (lachydotmcg/capri-desktop, mochiiwuff/capri-desktop);
+;     its terms are in the pack's NOTICE.md.
 ;   - Her model (page "Her model", when Synaps has none yet): an account to sign in to (the finish page
 ;     signs in: his browser opens on the page; Copilot's code in a small window), a model on this PC
 ;     (Ollama's, LM Studio's), an API key (to Synaps on its stdin, never on a command line), or later
@@ -24,7 +29,8 @@
 ; plain words, with the one command that tries it again. Unattended, the log says it.
 ;
 ; Unattended: setup.exe /VERYSILENT /SUPPRESSMSGBOXES [/SYNAPS=install|skip]
-;             [/PACK=download|skip|"C:\packs\capri"] [/VOICE=on|off] [/MIC="Microphone (...)"]
+;             [/PACK=download|skip|"C:\packs\capri"] [/LOCALART=on|off] [/UPSCALE=on|off]
+;             [/VOICE=on|off] [/MIC="Microphone (...)"]
 ;             [/VOICEFROM="C:\...\capri-syn-voice-setup.exe" or a URL] [/TASKS=autostart]
 ;             [/BRAIN=later|local|local:MODEL|ACCOUNT]
 ; The defaults are the wizard's: Synaps if it's needed, her art downloaded, autostart on, her voice
@@ -106,6 +112,10 @@ Source: "..\..\installer\manifest"; DestDir: "{app}\steps\installer"; Flags: ign
 Source: "..\..\tools\make-pack"; DestDir: "{app}\steps\tools"; Flags: ignoreversion
 Source: "..\..\tools\capricore-*.sha256"; DestDir: "{app}\steps\tools"; Flags: ignoreversion
 Source: "..\..\tools\lachy-desktop-*.sha256"; DestDir: "{app}\steps\tools"; Flags: ignoreversion
+Source: "..\..\tools\mochi-desktop-*.sha256"; DestDir: "{app}\steps\tools"; Flags: ignoreversion
+Source: "..\..\tools\mochi_hair.py"; DestDir: "{app}\steps\tools"; Flags: ignoreversion
+Source: "..\..\tools\lachy-x2.sha256"; DestDir: "{app}\steps\tools"; Flags: ignoreversion
+Source: "..\..\tools\upscale_art.py"; DestDir: "{app}\steps\tools"; Flags: ignoreversion
 Source: "..\..\tools\desktop-art.json"; DestDir: "{app}\steps\tools"; Flags: ignoreversion
 Source: "..\..\tools\capricore-outfit.json"; DestDir: "{app}\steps\tools"; Flags: ignoreversion
 Source: "..\..\packs\capri\moods.json"; DestDir: "{app}\steps\packs\capri"; Flags: ignoreversion
@@ -142,6 +152,9 @@ Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile
 [UninstallDelete]
 ; Her old exe, renamed aside by an upgrade while a process of hers still mapped it.
 Type: files; Name: "{app}\synaps-avatar.exe.old-*"
+; Python's cache beside make-pack's helpers, if a pack step wrote one ({app}\steps is the steps' own;
+; steps.ps1 runs make-pack with -B so it doesn't).
+Type: filesandordirs; Name: "{app}\steps\tools\__pycache__"
 ; What she and the steps wrote: her log and state, her settings, the steps' download cache and this
 ; installer's note of what it did. Any pack he put in packs\ himself stays (and the one moved aside);
 ; her pack goes in code (when the steps made it). Installed by install.ps1 (/BY=install.ps1), her
@@ -180,6 +193,7 @@ var
   SynapsBox: TNewCheckBox;
   SynapsStatus: TNewStaticText;
   DownloadRadio, FolderRadio, SkipRadio: TNewRadioButton;
+  MochiBox, UpscaleBox: TNewCheckBox;
   FolderEdit: TNewEdit;
   BrowseButton: TNewButton;
   Progress: TOutputMarqueeProgressWizardPage;
@@ -257,6 +271,46 @@ begin
   if (P = '') or (P = 'download') then Result := PackDownload
   else if (P = 'skip') or (P = 'none') then Result := PackSkip
   else Result := PackFolder;
+end;
+
+{ /LOCALART=off: the download without mochi's art; /UPSCALE=on: with lachy's strips at x2. }
+{ /NAME=off (or 0, no, false); ParamOn: /NAME=on (or 1, yes, true). }
+function ParamOff(const Name: String): Boolean;
+var
+  V: String;
+begin
+  V := Lowercase(Trim(ExpandConstant('{param:' + Name + '|}')));
+  Result := (V = 'off') or (V = '0') or (V = 'no') or (V = 'false');
+end;
+
+function ParamOn(const Name: String): Boolean;
+var
+  V: String;
+begin
+  V := Lowercase(Trim(ExpandConstant('{param:' + Name + '|}')));
+  Result := (V = 'on') or (V = '1') or (V = 'yes') or (V = 'true');
+end;
+
+{ What the last download was asked for (its pack's marker, steps.ps1's choice=mochi=0|1|- x2=0|1|-):
+  True when it says Key. }
+function LastChose(const Key: String): Boolean;
+var
+  Lines: TArrayOfString;
+  I: Integer;
+begin
+  Result := False;
+  if not LoadStringsFromFile(PackDest('') + '\.capri-syn-pack', Lines) then exit;
+  for I := 0 to GetArrayLength(Lines) - 1 do
+    if (Copy(Lines[I], 1, 7) = 'choice=') and (Pos(' ' + Key + ' ', ' ' + Copy(Lines[I], 8, Length(Lines[I])) + ' ') > 0) then
+      Result := True;
+end;
+
+{ The download's steps.ps1 pack flags, as its boxes say. }
+function PackFlags: String;
+begin
+  Result := '';
+  if MochiBox.Checked then Result := Result + ' -LocalArt' else Result := Result + ' -NoLocalArt';
+  if UpscaleBox.Checked then Result := Result + ' -Upscale' else Result := Result + ' -NoUpscale';
 end;
 
 { His pick on the pack page (unattended: /PACK=, as the page started on it). }
@@ -569,6 +623,16 @@ begin
   Result.OnClick := Click;
 end;
 
+function NewBox(Page: TWizardPage; const Caption: String; Top: Integer): TNewCheckBox;
+begin
+  Result := TNewCheckBox.Create(Page);
+  Result.Parent := Page.Surface;
+  Result.Top := Top;
+  Result.Width := Page.SurfaceWidth;
+  Result.Height := ScaleY(20);
+  Result.Caption := Caption;
+end;
+
 procedure CreateBrainPage;
 var
   T: TNewStaticText;
@@ -878,6 +942,8 @@ procedure PackChoiceClick(Sender: TObject);
 begin
   FolderEdit.Enabled := FolderRadio.Checked;
   BrowseButton.Enabled := FolderRadio.Checked;
+  MochiBox.Enabled := DownloadRadio.Checked;
+  UpscaleBox.Enabled := DownloadRadio.Checked;
 end;
 
 procedure BrowseClick(Sender: TObject);
@@ -895,13 +961,21 @@ var
   Y: Integer;
 begin
   PackPage := CreateCustomPage(ModelPage.ID, 'Her pack', 'Which art should she wear?');
-  T := NewText(PackPage, 'Her art isn''t in this installer. Setup can download it from its artists'' GitHub ' +
-    'repositories and build her pack on this PC.', 0, 0);
+  T := NewText(PackPage, 'Her art isn''t in this installer. Setup can download it from the GitHub repositories ' +
+    'that publish it and build her pack on this PC.', 0, 0);
   Y := T.Top + T.Height + ScaleY(10);
-  DownloadRadio := NewRadio(PackPage, 'Download her art (CapriCore + lachy''s desktop art, ~120 MB)', Y, @PackChoiceClick);
-  T := NewText(PackPage, 'At pinned versions, every file checked against its SHA-256. lachy''s desktop art is under ' +
-    'the PolyForm Noncommercial License 1.0.0 (noncommercial use only): its notices are shown when it''s done.',
-    ScaleX(18), DownloadRadio.Top + DownloadRadio.Height + ScaleY(2));
+  DownloadRadio := NewRadio(PackPage, 'Download her art (CapriCore, lachy''s and mochi''s desktop art, ~150 MB)', Y, @PackChoiceClick);
+  MochiBox := NewBox(PackPage, 'mochi''s art: her intro close-ups and face cut-ins', DownloadRadio.Top + DownloadRadio.Height + ScaleY(2));
+  MochiBox.Left := ScaleX(18);
+  MochiBox.Width := PackPage.SurfaceWidth - ScaleX(18);
+  MochiBox.Checked := ParamOn('LOCALART') or (not ParamOff('LOCALART') and not LastChose('mochi=0'));
+  UpscaleBox := NewBox(PackPage, 'lachy''s strips at x2, sharper (~175 MB more, ~45 min of CPU)', MochiBox.Top + MochiBox.Height);
+  UpscaleBox.Left := ScaleX(18);
+  UpscaleBox.Width := PackPage.SurfaceWidth - ScaleX(18);
+  UpscaleBox.Checked := ParamOn('UPSCALE') or (not ParamOff('UPSCALE') and LastChose('x2=1'));
+  T := NewText(PackPage, 'From lachydotmcg/capri-desktop and mochiiwuff/capri-desktop at pinned versions, every file ' +
+    'checked against its SHA-256; the art files are not in capri-syn''s repository. Its terms are in the pack''s ' +
+    'NOTICE.md, and its notices are shown when it''s done.', ScaleX(18), UpscaleBox.Top + UpscaleBox.Height + ScaleY(2));
   Y := T.Top + T.Height + ScaleY(10);
   FolderRadio := NewRadio(PackPage, 'Use a pack folder I already have', Y, @PackChoiceClick);
   FolderEdit := TNewEdit.Create(PackPage);
@@ -1047,16 +1121,6 @@ begin
   else Result := Result + ' -MicDefault';
   V := VoiceFrom;
   if V <> '' then Result := Result + ' -VoiceFrom "' + V + '"';
-end;
-
-function NewBox(Page: TWizardPage; const Caption: String; Top: Integer): TNewCheckBox;
-begin
-  Result := TNewCheckBox.Create(Page);
-  Result.Parent := Page.Surface;
-  Result.Top := Top;
-  Result.Width := Page.SurfaceWidth;
-  Result.Height := ScaleY(20);
-  Result.Caption := Caption;
 end;
 
 procedure CreateVoicePage;
@@ -1221,10 +1285,10 @@ begin
     RunPick;
     case PackChoice of
       PackDownload: begin
-        PackOk := RunStep('pack', 'Her art: downloading and building her pack', StepsScript, 'pack');
+        PackOk := RunStep('pack', 'Her art: downloading and building her pack', StepsScript, 'pack' + PackFlags);
         if not PackOk then begin
           PackWhy := StepFailed;
-          Retry.Add('Her art: ' + StepCommand('pack'));
+          Retry.Add('Her art: ' + StepCommand('pack' + PackFlags));
         end;
       end;
       PackFolder: begin
@@ -1393,7 +1457,7 @@ begin
   end;
   if Notices.Count > 0 then begin
     if Result <> '' then Result := Result + #13#10;
-    Result := Result + 'lachy''s desktop art (PolyForm Noncommercial 1.0.0, https://polyformproject.org/licenses/noncommercial/1.0.0):' + #13#10;
+    Result := Result + 'Her desktop art''s Required Notices (its terms: NOTICE.md in her pack):' + #13#10;
     for I := 0 to Notices.Count - 1 do Result := Result + Notices[I] + #13#10;
   end;
 end;

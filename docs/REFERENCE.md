@@ -534,10 +534,13 @@ Optional desktop art, into the pack's `anim/` (a pack without it loads as before
 - `--lachy DIR|auto`: [lachydotmcg/capri-desktop](https://github.com/lachydotmcg/capri-desktop) at `156ed18`
   (PolyForm Noncommercial 1.0.0): its sprite strips, stills and emotes, checked against
   `tools/lachy-desktop-156ed18.sha256`. `auto` downloads exactly those files at that commit (cached).
-- `--mochi DIR|auto`: mochiiwuff/capri-desktop at `c011764`, checked against `tools/mochi-desktop-c011764.sha256`.
-  Its images are show frames and fan art that its licence does not cover: local personal use only, never
-  published. Only this flag puts them in a pack (into your local pack directory); nothing in this repo
-  ships or fetches them otherwise. They give her the launch close-up (below).
+- `--mochi DIR|auto`: [mochiiwuff/capri-desktop](https://github.com/mochiiwuff/capri-desktop) at `c011764`,
+  checked against `tools/mochi-desktop-c011764.sha256`. Its images are show frames, a fan-made cut-out and
+  fan art; its code is under PolyForm Noncommercial 1.0.0, and its README's "Credits and rights" speaks
+  for the images (`NOTICE.md` quotes it, with its Required Notice line). They
+  go into your local pack directory, downloaded from that repository; the art files are not in this
+  repository. The installers pass it by default (`--no-local-art` doesn't). They give her the
+  launch close-up (below), the cut-ins and the Line's faces.
 - `--mochi-hair red|flat|original` (default `red`): those close-ups draw her hair black; make-pack repaints it
   as it copies them (`tools/mochi_hair.py`: a measured head region minus her face, times the black ink;
   arms, hands, body and the linework stay as drawn). `red` is her avatar's red with its shadow red and a
@@ -555,7 +558,10 @@ Optional desktop art, into the pack's `anim/` (a pack without it loads as before
   1.167 display lachy's standing strips draw at 1.16x and their edges go soft (alpha ramp 1.8 px against
   CapriCore's 1.25-1.3); from the x2 strips they come out at 1.3 (perch and laydown at 0.95). The app uses
   `x2/` when present and her pixels are above 1:1, else the strips as shipped. About 24 min of CPU
-  (recorded on an i5-13420H, 4 threads) and +220 MB on disk.
+  when the pins were recorded (an i5-13420H, 4 threads); measured again for the installers there at
+  `nice 19` beside other work, 44 min (144 CPU-minutes, torch 2.15 CPU), +219 MB on disk and ~255 MB
+  to download (torch's CPU wheel, scipy). The installers run it with `--upscale` (off by default:
+  `pack_upscale` in `installer/manifest`); one that fails is said, and her pack is built without it.
 
 With `anim/`, `moods.json` `variants` mixes that art in; she never swaps one set for the other:
 
@@ -614,7 +620,7 @@ With `anim/`, `moods.json` `variants` mixes that art in; she never swaps one set
   1 px points, pink on their outer half: a hot centre fading into her hair. One that couldn't show yet
   starts its life when it does (it swells from nothing). When one can't show (a glitch, a turn, a frame
   without hair) she tries again 300 ms later.
-- `cutins` (local images, `--mochi` only; a beat without its image, or a pack without them, shows
+- `cutins` (mochi's images, `--mochi` only; a beat without its image, or a pack without them, shows
   nothing): a show still beside her for a big moment, `ms` long (Capri 1.2 s): `needsYou` (NEEDS YOU,
   600 ms after it; a summon landing in that time shows `summon` instead), `done` (a turn of at least
   `doneAfterMs`), `laugh` (`laughChance` of her laughs at a click), `summon` (a summon for his prompt
@@ -626,7 +632,7 @@ With `anim/`, `moods.json` `variants` mixes that art in; she never swaps one set
   over her head), among equals her roomier side; `height` px tall, a plate cut and rimmed in her red;
   clicks pass through it. Never while the Line or the reader is open, a fullscreen window hides her, DND
   is on, or the intro plays; she moves off and it leaves at once. The window and its pixels go with it.
-- `lineFaces` (mood → `anim/mochi` image, local only, with the square of it that is her face: `centre`,
+- `lineFaces` (mood → `anim/mochi` image, `--mochi` only, with the square of it that is her face: `centre`,
   `size` in source px): her face on her latest row in the Line follows her mood (thinking, working, NEEDS
   YOU, done, annoyed, sleepy...), the square reduced by a whole number to the tile (sharp, no resampling
   blur) in a 1 px border of her red; older rows keep the portrait. A mood without one keeps the portrait.

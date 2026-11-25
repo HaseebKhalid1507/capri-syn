@@ -125,6 +125,12 @@ Check ((Get-RunValue 'synaps-daemon') -match '^"[^"]*\\conhost\.exe" --headless 
 Check (Test-Path (Join-Path $pack 'sprites.json')) "her pack in $pack"
 Check (Test-Path (Join-Path $pack 'anim\lachy\LICENSE.md')) "with lachy's art and its licence"
 Check ($setupLog -match 'Required Notice: ') "lachy's Required Notice lines were said"
+# The full pack by default: mochi's art too (its 25 files with its licence; lachy's strips at x2 aren't).
+$mochi = @(Get-ChildItem -LiteralPath (Join-Path $pack 'anim\mochi') -File -ErrorAction SilentlyContinue)
+Check ($mochi.Count -ge 25 -and (Test-Path (Join-Path $pack 'anim\mochi\LICENSE'))) "with mochi's art and its licence, by default ($($mochi.Count) files)"
+$notice = if (Test-Path (Join-Path $pack 'NOTICE.md')) { Get-Content -Raw (Join-Path $pack 'NOTICE.md') } else { '' }
+Check ($notice -match '## Images from mochiiwuff/capri-desktop' -and $notice -match 'Required Notice: Copyright \(c\) 2026 mochiiwuff') "its NOTICE.md has mochi's section and Required Notice line"
+Check (-not (Test-Path (Join-Path $pack 'anim\lachy\x2'))) 'no x2 strips (pack_upscale: off)'
 $before = if (Test-Path $herLog) { (Get-Item $herLog).Length } else { 0 }
 $c = Start-Process $exe -ArgumentList "--pack `"$pack`" --check" -Wait -PassThru -WindowStyle Hidden
 $text = if (Test-Path $herLog) { (Get-Content -Raw $herLog).Substring([int]$before) } else { '' }
@@ -138,7 +144,10 @@ $off = [regex]::Match($setupLog, 'voice: off \(.*?\)').Value
 Check ([bool]$off) "her voice is off by default here, and the log says why: $off"
 Check (-not (Test-Path (Join-Path $app 'voice')) -and -not (Test-Path (Join-Path $env:LOCALAPPDATA 'capri-voice'))) 'and no voice files'
 
-# 4. She starts, from his profile folder (the finish page's "Start her now"), and attaches.
+# 4. She starts, from his profile folder (the finish page's "Start her now"), and attaches. The shots
+# are public and never show mochi's art: its images go first (she runs without them, as without the
+# files a pack built with -NoLocalArt lacks; the art's checks are above).
+Remove-Item -Recurse -Force -LiteralPath (Join-Path $pack 'anim\mochi') -ErrorAction SilentlyContinue
 $from = (Get-Item $herLog -ErrorAction SilentlyContinue).Length
 $t0 = Get-Date
 $her = Start-Process $exe -WorkingDirectory $env:USERPROFILE -PassThru

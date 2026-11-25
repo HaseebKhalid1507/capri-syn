@@ -32,8 +32,8 @@ $Cross = [string][char]0x2717
 
 $Usage = @'
 usage: install.ps1 [--yes] [--dry-run] [--uninstall [--purge]] [--voice] [--watch] [--no-autostart]
-                   [--from-source] [--prefix DIR] [--with-local-art] [--artifact FILE] [--allow-root]
-                   [--brain WHICH]
+                   [--from-source] [--prefix DIR] [--no-local-art] [--upscale | --no-upscale]
+                   [--artifact FILE] [--allow-root] [--brain WHICH]
 
   --yes             don't ask: Synaps' installer, and Visual Studio's C++ build tools (admin) for a
                     source build
@@ -46,7 +46,13 @@ usage: install.ps1 [--yes] [--dry-run] [--uninstall [--purge]] [--voice] [--watc
   --no-autostart    don't start her at sign-in (she still starts now, at the end)
   --from-source     build her from source even when a release has an installer
   --prefix DIR      where she goes (default %LOCALAPPDATA%\Programs\synaps-avatar)
-  --with-local-art  also mochi's art: LOCAL PERSONAL USE ONLY, never publish or share it
+  --no-local-art    leave mochi's art out of her pack (her intro close-ups and face cut-ins); a
+                    rerun keeps it out until --with-local-art (its old opt-in; mochi's art is the
+                    default now)
+  --upscale         also lachy's strips at x2 (Real-ESRGAN on the CPU through torch: ~175 MB more
+                    to download, ~45 min of CPU); if it fails, her pack is built without them. A
+                    rerun keeps them until --no-upscale
+  --no-upscale      not those (the default: off)
   --artifact FILE   install this release asset (her setup .exe) instead of downloading one
   --allow-root      install.sh's (installing as root); nothing to allow here
   --brain WHICH     her model, when Synaps has none: an account to sign in to now, in your browser
@@ -55,7 +61,8 @@ usage: install.ps1 [--yes] [--dry-run] [--uninstall [--purge]] [--voice] [--watc
                     this PC: Ollama, LM Studio), or later. Without it she asks; --yes means later
 
 Each flag also has PowerShell's spelling: -Yes, -DryRun, -Uninstall, -Purge, -Voice, -Watch,
--NoAutostart, -FromSource, -Prefix DIR, -WithLocalArt, -Artifact FILE, -AllowRoot, -Brain WHICH.
+-NoAutostart, -FromSource, -Prefix DIR, -NoLocalArt, -WithLocalArt, -Upscale, -NoUpscale, -Artifact FILE,
+-AllowRoot, -Brain WHICH.
 With no flags (irm | iex can't pass any), $env:CAPRI_INSTALL_FLAGS is read instead (space-separated),
 said in the banner, then cleared from your session: it applies to one run only.
 Steps and details: docs/INSTALL.md (https://github.com/HaseebKhalid1507/capri-syn)
@@ -225,7 +232,7 @@ function Set-RunValue([string]$Name, [string]$Value) {
 function Read-Flags([string[]]$ArgList) {
     $script:Yes = $false; $script:Dry = $false; $script:Uninstall = $false; $script:Purge = $false
     $script:Voice = $false; $script:Watch = $false; $script:Autostart = $true; $script:FromSource = $false
-    $script:LocalArt = $false; $script:Prefix = Join-Path $env:LOCALAPPDATA 'Programs\synaps-avatar'; $script:Artifact = ''; $script:PrefixGiven = $false
+    $script:LocalArt = ''; $script:Upscale = ''; $script:Prefix = Join-Path $env:LOCALAPPDATA 'Programs\synaps-avatar'; $script:Artifact = ''; $script:PrefixGiven = $false
     $script:HisRun = ''; $script:StoppedElsewhere = $false; $script:BrainPick = ''
     $i = 0
     while ($ArgList -and $i -lt $ArgList.Count) {
@@ -242,7 +249,10 @@ function Read-Flags([string[]]$ArgList) {
             'watch' { $script:Watch = $true }
             'noautostart' { $script:Autostart = $false }
             'fromsource' { $script:FromSource = $true }
-            'withlocalart' { $script:LocalArt = $true }
+            'withlocalart' { $script:LocalArt = 'on' }
+            'nolocalart' { $script:LocalArt = 'off' }
+            'upscale' { $script:Upscale = 'on' }
+            'noupscale' { $script:Upscale = 'off' }
             'allowroot' { }
             { $_ -in 'prefix', 'artifact', 'brain' } {
                 if ($null -eq $val) {
@@ -706,16 +716,24 @@ function Find-Python {
 }
 
 # The pack step both installers run (steps.ps1 pack): Python (CPython's embeddable package and pip,
-# pinned, no Python of his needed) and CapriCore in the cache, make-pack with lachy's files, every file
-# checked against tools/*.sha256, her --check, then into place (a pack it didn't make moved aside).
-# Its tree is her source's: make-pack and the pins match her binary.
+# pinned, no Python of his needed) and CapriCore in the cache, make-pack with lachy's and mochi's
+# files, every file checked against tools/*.sha256, her --check, then into place (a pack it didn't
+# make moved aside). Its tree is her source's: make-pack and the pins match her binary.
 function Install-Pack {
     Write-Step 'Her art pack'
     $src = Get-Source $(if ($script:ReleaseTag) { $script:ReleaseTag } else { $script:Ref })
-    if ($script:LocalArt) { Write-Warn "--with-local-art: mochi's art is for LOCAL PERSONAL USE ONLY: never commit, publish or share it" }
     $steps = Join-Path $src 'packaging\windows\steps.ps1'
     $a = @('pack', '-Out', $script:Pack, '-Cache', $script:Cache, '-Exe', $script:Exe, '-KeepCache')
-    if ($script:LocalArt) { $a += '-LocalArt' }
+    # mochi's art is on by default, and without a flag the steps do as the last run was asked. Steps
+    # from before that (1.2.0's) take -LocalArt for it, and have no -NoLocalArt or x2 upscale.
+    $now = (Test-Path -LiteralPath $steps) -and (Select-String -LiteralPath $steps -SimpleMatch '[switch]$NoLocalArt' -Quiet)
+    if ($now) {
+        if ($script:LocalArt) { $a += $(if ($script:LocalArt -eq 'on') { '-LocalArt' } else { '-NoLocalArt' }) }
+        if ($script:Upscale) { $a += $(if ($script:Upscale -eq 'on') { '-Upscale' } else { '-NoUpscale' }) }
+    } else {
+        if ($script:LocalArt -ne 'off') { $a += '-LocalArt' }
+        if ($script:Upscale -eq 'on') { Write-Warn "--upscale: her release's install steps have no x2 upscale yet (the next one does), so her pack is built without it" }
+    }
     # Made by this script before the steps marked their packs: still its own.
     if (Test-Recorded 'dir' $script:Pack) { $a += '-Ours' }
     if ($script:Dry) {
@@ -1013,6 +1031,17 @@ function Write-SynapsStays([string]$Mine, [string]$PathEdit, [string]$Rustup) {
     if ($Rustup) { Write-Info 'rustup stays too (this installed it for her build): `rustup self uninstall` removes it' }
 }
 
+# What her pack holds, for the summary: as built (a dry run: as asked).
+function Get-PackHow {
+    $mochi = $script:LocalArt -ne 'off'
+    $x2 = $script:Upscale -eq 'on' -or (-not $script:Upscale -and $script:M.pack_upscale -eq 'on')
+    if (-not $script:Dry -and (Test-Path -LiteralPath (Join-Path $script:Pack 'sprites.json'))) {
+        $mochi = Test-Path -LiteralPath (Join-Path $script:Pack 'anim\mochi')
+        $x2 = Test-Path -LiteralPath (Join-Path $script:Pack 'anim\lachy\x2')
+    }
+    "capri (CapriCore v1.0.4 + lachy$(if ($mochi) { ' + mochi' })$(if ($x2) { ', x2 strips' }))"
+}
+
 function Write-Summary {
     Write-Host ''
     Write-Host " $($Bar)installed" -ForegroundColor Red -NoNewline
@@ -1020,7 +1049,7 @@ function Write-Summary {
     $rows = [ordered]@{
         'synaps'        = "$($script:SynapsV)  $(Get-Tilde $script:Synaps)"
         'synaps-avatar' = "$($script:BinVer)  $(Get-Tilde $script:Exe)"
-        'her pack'      = "capri (CapriCore v1.0.4 + lachy$(if ($script:LocalArt) { ' + mochi, local only' }))  $(Get-Tilde $script:Pack)"
+        'her pack'      = "$(Get-PackHow)  $(Get-Tilde $script:Pack)"
         'daemon'        = "$($script:DaemonState), $($script:DaemonHow)"
         'summon'        = 'Win+Alt+C'
         'autostart'     = $script:AutostartHow

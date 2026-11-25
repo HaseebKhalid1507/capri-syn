@@ -71,7 +71,20 @@ pip_wheel_sha256=f3b60b20ffaadd4415ed7957212a38ac63fa4c5fa375bd0f4a797777940fad1
 # pip_pack's wheels there, by SHA-256 (pip --require-hashes): fonttools 4.65.0's cp313 win_amd64 and
 # py3-none-any, from PyPI. Bump with pip_pack.
 pip_pack_sha256=8ae1846b0f192fd485d26a455af19b8f5cf05aff08f9836f533913d8fcea133c 3060b8c1fc2329fa20265b7c138614143ea7c1624e26c5c180c76aeb74deae6f
-# --with-local-art: mochi's hair recolour (tools/mochi_hair.py) needs these too.
+# mochi's art (on by default; --no-local-art leaves it out): its hair recolour (tools/mochi_hair.py)
+# needs these too.
 pip_local_art=numpy>=1.26,<3 Pillow>=10,<14
+# The x2 upscale of lachy's strips (make-pack --upscale, tools/upscale_art.py: Real-ESRGAN on the CPU
+# through torch). pack_upscale is its default, on or off (--upscale / --no-upscale say otherwise, and a
+# rerun keeps what was asked). Off: measured on an i5-13420H (torch 2.15 CPU, 4 threads, nice 19),
+# 44 min (144 CPU-minutes) and ~255 MB more to download (torch's CPU wheel, scipy), ~1.1 GB more in
+# the venv, +219 MB of x2 strips. torch is pinned to the version tools/lachy-x2.sha256 was checked
+# with (2.15.0: Python 3.11+; with 3.10 its pip fails, said). A failed upscale never fails the install:
+# her pack is built without x2. Linux takes torch from pip_upscale_index alone (PyPI's Linux torch
+# pulls CUDA, GBs), the rest from PyPI; Windows all from PyPI (torch is CPU only there). Both add
+# pip_local_art (Pillow, numpy: upscale_art.py reads and writes with them).
+pack_upscale=off
+pip_upscale=torch==2.15.0 scipy
+pip_upscale_index=https://download.pytorch.org/whl/cpu
 # --voice on Linux: tools/capri-voice-setup uses uv; installed in that venv when it's missing.
 pip_uv=uv==0.13.9

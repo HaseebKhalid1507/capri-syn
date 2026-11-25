@@ -4,7 +4,7 @@
 #
 #   bin/synaps-avatar  bin/avatarctl
 #   lib/synaps-avatar/ VERSION, installer/manifest, packs/capri/{moods.json,persona.md},
-#                      tools/ (make-pack and its pins, capri-voice, capri-watch, the user units, …),
+#                      tools/ (make-pack, its pins and helpers, capri-voice, capri-watch, the user units, …),
 #                      LICENSE and licenses/ (installer/licenses/list: the notices that go with her
 #                      binary), tools/wake/NOTICE beside the wake-word model
 #   install.sh         run it from the unpacked tarball to install that tarball
@@ -33,9 +33,10 @@ l=$out/lib/synaps-avatar
 printf '%s\n' "$ver" >"$l/VERSION"
 install -m 644 "$src/installer/manifest" "$l/installer/manifest"
 install -m 644 "$src/packs/capri/moods.json" "$src/packs/capri/persona.md" "$l/packs/capri/"
-# make-pack and everything it reads (its pins, the desktop art's geometry, the hair recolour).
+# make-pack and everything it reads (its pins, the desktop art's geometry, the hair recolour, the x2 upscale).
 install -m 755 "$src/tools/make-pack" "$l/tools/"
-install -m 644 "$src"/tools/*.sha256 "$src/tools/desktop-art.json" "$src/tools/capricore-outfit.json" "$src/tools/mochi_hair.py" "$l/tools/"
+install -m 644 "$src"/tools/*.sha256 "$src/tools/desktop-art.json" "$src/tools/capricore-outfit.json" "$src/tools/mochi_hair.py" \
+    "$src/tools/upscale_art.py" "$l/tools/"
 # Voice, watch and the remote helper (installed into bin/ by --voice / --watch).
 install -m 755 "$src/tools/capri-voice" "$src/tools/capri-voice-setup" "$src/tools/synaps-avatar-remote" "$l/tools/"
 install -m 644 "$src/tools/wake/hey-capri-v1.npz" "$src/tools/wake/NOTICE" "$l/tools/wake/"

@@ -1206,6 +1206,164 @@ INT
     exit "$fails"
 ) || fails=$((fails + $?))
 
+# Her pack (step_pack), on stand-ins: a venv python that is make-pack (FAIL=upscale|mochi|trace|all
+# fails that run as make-pack does; pip fails when its arguments hold PIP_FAIL), her binary's --check
+# (CHECK_FAIL=mochi: a pack with mochi's art doesn't pass), a cached CapriCore. The full pack is the
+# default; the x2 strips and mochi's art never fail the install; a pack built before mochi's art was
+# the default is built again with it; a rerun keeps what was asked.
+(
+    p=$tmp/pack-home
+    HOME=$p DATA=$p/.local/share CACHE_BASE=$p/.cache CACHE_ROOT=$p/.cache/synaps-avatar CACHE=$p/.cache/synaps-avatar/installer
+    PACK=$DATA/synaps-avatar/packs/capri RECEIPT=$DATA/synaps-avatar/install.receipt VENV=$CACHE/venv BIN=$p/bin LIB=$p/lib
+    M_pip_pack=fonttools==4.65.0 M_pip_local_art='numpy>=1.26,<3 Pillow>=10,<14' M_pip_upscale='torch==2.15.0 scipy' M_pip_upscale_index=https://download.pytorch.org/whl/cpu
+    M_capricore_repo=CapriChooms/CapriCore M_capricore_commit=bc93892c751a73fdce14355b477dcdc775e46fd9 M_pack_upscale=off
+    RUN_REAL=1 LOCAL_ART='' UPSCALE=''
+    # The receipt's meta lines for real here (above, a stand-in that keeps nothing).
+    eval "$(sed -n '/^rec_meta() {$/,/^}$/p' "$here/install.sh")"
+    mkdir -p "$VENV/bin" "$BIN" "$LIB/tools" "$LIB/packs/capri" "$CACHE/CapriCore-bc93892/docs" "$DATA/synaps-avatar"
+    touch "$CACHE/CapriCore-bc93892/docs/character-assets.md" "$LIB/tools/make-pack" "$LIB/tools/upscale_art.py" "$LIB/tools/lachy-x2.sha256"
+    printf '%s\n' "$M_pip_pack" >"$VENV/.capri-pip"
+    printf '%s\n' "$M_pip_local_art" >"$VENV/.capri-pip-art"
+    cat >"$VENV/bin/python" <<'PY'
+#!/usr/bin/env bash
+if [ "$1" = -m ]; then
+    echo "pip $*" >>"$CALLS"
+    if [ -n "${PIP_FAIL:-}" ] && [[ " $* " == *"$PIP_FAIL"* ]]; then echo "ERROR: No matching distribution found for $PIP_FAIL"; exit 1; fi
+    exit 0
+fi
+[ "$1" != -B ] || shift
+shift; echo "make-pack $*" >>"$CALLS"
+out=$2; args=" $* "
+case ${FAIL:-}:$args in
+    all:*) echo "make-pack: $1 is not CapriCore v1.0.4 (3 file(s) differ)"; exit 1 ;;
+    upscale:*' --upscale '*) echo 'make-pack: + x2 strips'; echo 'make-pack: --upscale: 2 strip(s) differ from tools/lachy-x2.sha256 (another torch or CPU?)'; exit 1 ;;
+    mochi:*' --mochi '*) echo 'make-pack: --mochi auto: cannot download https://raw.githubusercontent.com/mochiiwuff/capri-desktop/c011764/LICENSE (HTTP Error 404)'; exit 1 ;;
+    trace:*' --mochi '*) printf 'make-pack: Capri -> %s\nTraceback (most recent call last):\n  File "mochi_hair.py", line 80, in recolour\nKeyError: %s\n' "$out" "'intro-wave1.webp'"; exit 1 ;;
+esac
+mkdir -p "$out/anim/lachy"; echo '{}' >"$out/sprites.json"
+echo 'Required Notice: Copyright 2026 Lachy (https://github.com/lachydotmcg)' >"$out/anim/lachy/LICENSE.md"
+case $args in *' --mochi '*)
+    mkdir -p "$out/anim/mochi"
+    echo 'Required Notice: Copyright (c) 2026 mochiiwuff (https://github.com/mochiiwuff/capri-desktop)' >"$out/anim/mochi/LICENSE"
+    printf '## Images from mochiiwuff/capri-desktop\n\nOn these images, its README, "Credits and rights":\n\n> Its rights paragraph.\n' >"$out/NOTICE.md" ;;
+esac
+case $args in *' --upscale '*) mkdir -p "$out/anim/lachy/x2" ;; esac
+echo "make-pack: Capri -> $out"
+PY
+    cat >"$BIN/synaps-avatar" <<'SH'
+#!/bin/sh
+if [ "${CHECK_FAIL:-}" = mochi ] && [ -d "$2/anim/mochi" ]; then echo 'synaps-avatar: pack: anim/mochi/intro-wave1.webp: its sha256 is not its pin'; exit 1; fi
+echo 'pack `Capri` ok: 69 frames'
+SH
+    chmod +x "$VENV/bin/python" "$BIN/synaps-avatar"
+    export CALLS=$p/calls
+    # One step_pack: its output in $p/out, its make-pack and pip runs in $p/calls, its exit code in PRC.
+    pack() { : >"$CALLS"; (step_pack) >"$p/out" 2>&1; PRC=$?; }
+    builds() { grep -c '^make-pack ' "$CALLS"; }
+    last() { grep '^make-pack ' "$CALLS" | tail -n1; }
+    said() { grep -qF -- "$1" "$p/out"; }
+    forget() { sed -i '/^meta\tpack_choice\t/d; /^meta\tpack_x2_failed\t/d' "$RECEIPT"; }
+    full=" --lachy auto --mochi auto"
+
+    pack
+    check "$([ "$PRC" = 0 ] && [ "$(builds)" = 1 ] && last | grep -q -- "$full\$" && [ -d "$PACK/anim/mochi" ] && [ ! -d "$PACK/anim/lachy/x2" ] &&
+        [[ $(meta pack) == *-1-x0 ]] && echo 0)" "the default: one make-pack, lachy's and mochi's art, no x2 ($(last | grep -o -- ' --.*'); receipt: $(meta pack))"
+    check "$(said "with mochi's art" && ! grep -qi 'personal use' "$p/out" && ! grep -qi 'redistribut\|artists. repo' "$p/out" &&
+        said "downloaded onto your machine from the repositories that publish it (lachydotmcg/capri-desktop, mochiiwuff/capri-desktop); the art files are not in capri-syn's repository" &&
+        said "mochi's art, its README (\"Credits and rights\"): Its rights paragraph." && said 'Required Notice: Copyright (c) 2026 mochiiwuff' && echo 0)" \
+        "and it says where the art came from, its README's own words and each Required Notice; no personal-use warning"
+    pack
+    check "$([ "$PRC" = 0 ] && [ "$(builds)" = 0 ] && said 'up to date' && echo 0)" "again: up to date, nothing built"
+    # An install before this one: its pack without mochi's art, and the fingerprint it recorded then.
+    rm -rf "$PACK/anim/mochi"
+    sed -i 's/^\(meta\tpack\t\).*/\1f00dcafe0badf00-0/' "$RECEIPT"
+    pack
+    check "$([ "$PRC" = 0 ] && [ "$(builds)" = 1 ] && [ -d "$PACK/anim/mochi" ] && [[ $(meta pack) == *-1-x0 ]] && echo 0)" \
+        "an older install's pack (no mochi, its fingerprint): built again, the full pack ($(meta pack))"
+    LOCAL_ART=0 pack
+    check "$([ "$PRC" = 0 ] && [ "$(builds)" = 1 ] && last | grep -q ' --lachy auto$' && [ ! -d "$PACK/anim/mochi" ] && [[ $(meta pack) == *-0-x0 ]] && echo 0)" \
+        "--no-local-art: without mochi's art ($(meta pack); asked: $(meta pack_choice))"
+    pack
+    check "$([ "$PRC" = 0 ] && [ "$(builds)" = 0 ] && [ ! -d "$PACK/anim/mochi" ] && said "without mochi's art, as asked last time" && echo 0)" \
+        "a plain rerun keeps it out: up to date, said"
+    LOCAL_ART=1 pack
+    check "$([ "$PRC" = 0 ] && [ "$(builds)" = 1 ] && [ -d "$PACK/anim/mochi" ] && [ "$(meta pack_choice)" = 'mochi=1 x2=-' ] && echo 0)" \
+        "--with-local-art puts it back ($(meta pack_choice))"
+    # The x2 strips: their pip, then the full pack again with them; a failed upscale warns and keeps the one without.
+    rm -f "$VENV/.capri-pip-x2"
+    UPSCALE=1 pack
+    check "$([ "$PRC" = 0 ] && grep -q -- '--index-url https://download.pytorch.org/whl/cpu torch==2.15.0$' "$CALLS" && ! grep -q 'pypi.org' "$CALLS" &&
+        grep -q -- '--no-cache-dir scipy numpy>=1.26,<3 Pillow>=10,<14$' "$CALLS" && [ "$(builds)" = 2 ] && last | grep -q -- "$full --upscale\$" &&
+        [ -d "$PACK/anim/lachy/x2" ] && [[ $(meta pack) == *-1-x1 ]] && echo 0)" \
+        "--upscale: torch 2.15.0 from its CPU index alone, scipy, numpy and Pillow from PyPI, then the full pack with the x2 strips ($(meta pack))"
+    pack
+    check "$([ "$PRC" = 0 ] && [ "$(builds)" = 0 ] && [ -d "$PACK/anim/lachy/x2" ] && said 'as asked last time' && echo 0)" "a plain rerun keeps them: up to date"
+    UPSCALE=1 FAIL=upscale pack
+    check "$([ "$PRC" = 0 ] && [ "$(builds)" = 0 ] && echo 0)" "--upscale again: up to date"
+    rm -rf "$PACK"
+    UPSCALE=1 FAIL=upscale pack
+    check "$([ "$PRC" = 0 ] && [ "$(builds)" = 2 ] && [ -d "$PACK/anim/mochi" ] && [ ! -d "$PACK/anim/lachy/x2" ] && [ ! -e "$PACK.x2" ] &&
+        said "the x2 upscale didn't work (make-pack: --upscale: 2 strip(s) differ" && [[ $(meta pack) == *-1-x0 ]] && [ -n "$(meta pack_x2_failed)" ] && echo 0)" \
+        "a failed upscale: said, and her pack is the full one without the x2 strips; the install goes on ($(meta pack))"
+    pack
+    check "$([ "$PRC" = 0 ] && [ "$(builds)" = 0 ] && said 'the x2 upscale failed last time on these same files' && echo 0)" \
+        "a plain rerun doesn't spend those 45 minutes again on the same files: up to date, said"
+    rm -f "$VENV/.capri-pip-x2"
+    UPSCALE=1 PIP_FAIL=torch pack
+    check "$([ "$PRC" = 0 ] && ! grep -q -- '--upscale' "$CALLS" && said "pip couldn't install torch==2.15.0 scipy" && [ ! -f "$VENV/.capri-pip-x2" ] && echo 0)" \
+        "torch's pip failing: said, no upscale tried, her pack as it was"
+    forget
+    M_pack_upscale=on PIP_FAIL=torch pack
+    check "$([ "$PRC" = 0 ] && grep -q 'download.pytorch.org' "$CALLS" && echo 0)" "pack_upscale=on in the manifest: the x2 strips by default"
+    UPSCALE=0 M_pack_upscale=on pack
+    check "$([ "$PRC" = 0 ] && ! grep -q 'pytorch' "$CALLS" && echo 0)" "and --no-upscale says no"
+    # --no-local-art --upscale: the x2 pip brings numpy and Pillow (upscale_art.py's) without mochi's.
+    rm -f "$VENV/.capri-pip-x2" "$VENV/.capri-pip-art"
+    LOCAL_ART=0 UPSCALE=1 pack
+    check "$([ "$PRC" = 0 ] && grep -q -- '--no-cache-dir scipy numpy>=1.26,<3 Pillow>=10,<14$' "$CALLS" && ! grep -q -- '--mochi' "$CALLS" &&
+        last | grep -q -- ' --lachy auto --upscale$' && [ -d "$PACK/anim/lachy/x2" ] && [ ! -d "$PACK/anim/mochi" ] && [[ $(meta pack) == *-0-x1 ]] && echo 0)" \
+        "--no-local-art --upscale: Pillow and numpy come with torch; lachy's strips at x2, no mochi ($(meta pack))"
+    # numpy and Pillow failing: mochi's close-ups as drawn, and the next run tries again.
+    forget
+    UPSCALE=0 PIP_FAIL=Pillow pack
+    check "$([ "$PRC" = 0 ] && said "pip couldn't install numpy>=1.26,<3 Pillow>=10,<14 (ERROR: No matching distribution found for Pillow): mochi's close-ups keep her hair as drawn" &&
+        last | grep -q -- "$full --mochi-hair original\$" && [ -d "$PACK/anim/mochi" ] && [[ $(meta pack) == *-1o-x0 ]] && [ ! -f "$VENV/.capri-pip-art" ] && echo 0)" \
+        "numpy/Pillow's pip failing: said, mochi's art with her hair as drawn ($(meta pack))"
+    UPSCALE=0 pack
+    check "$([ "$PRC" = 0 ] && [ "$(builds)" = 1 ] && last | grep -q -- "$full\$" && [[ $(meta pack) == *-1-x0 ]] && echo 0)" \
+        "and once they install, her hair is repainted ($(meta pack))"
+    # Anything failing with mochi's art: said, and her pack built without it. CapriCore failing fails the install.
+    rm -rf "$PACK"
+    FAIL=mochi pack
+    check "$([ "$PRC" = 0 ] && [ "$(builds)" = 2 ] && last | grep -q ' --lachy auto$' && [ -f "$PACK/sprites.json" ] && [ ! -d "$PACK/anim/mochi" ] &&
+        said "her pack with mochi's art didn't work (make-pack: --mochi auto: cannot download" && [[ $(meta pack) == *-0-x0 ]] && echo 0)" \
+        "mochi's art failing to download: said, and her pack built without it ($(meta pack))"
+    rm -rf "$PACK"
+    FAIL=mochi UPSCALE=1 pack
+    check "$([ "$PRC" = 0 ] && [ "$(builds)" = 3 ] && last | grep -q -- ' --lachy auto --upscale$' && [ -d "$PACK/anim/lachy/x2" ] && [ ! -d "$PACK/anim/mochi" ] &&
+        ! said "the x2 upscale didn't work" && [[ $(meta pack) == *-0-x1 ]] && echo 0)" \
+        "mochi's art failing with --upscale: mochi's is dropped, the x2 strips kept ($(meta pack))"
+    rm -rf "$PACK"
+    FAIL=trace UPSCALE=0 pack
+    check "$([ "$PRC" = 0 ] && [ "$(builds)" = 2 ] && [ -f "$PACK/sprites.json" ] && [ ! -d "$PACK/anim/mochi" ] &&
+        said "her pack with mochi's art didn't work (KeyError: 'intro-wave1.webp')" && echo 0)" \
+        "a traceback in mochi's path: its error said, and her pack built without it"
+    UPSCALE=0 pack
+    check "$([ "$PRC" = 0 ] && [ -d "$PACK/anim/mochi" ] && echo 0)" "(and the next run has it again)"
+    touch "$PACK/old-pack"
+    CHECK_FAIL=mochi UPSCALE=0 pack
+    check "$([ "$PRC" = 0 ] && [ "$(builds)" = 2 ] && [ ! -d "$PACK/anim/mochi" ] && [ ! -e "$PACK/old-pack" ] &&
+        said "her pack with mochi's art didn't work (it doesn't pass her --check: synaps-avatar: pack: anim/mochi/intro-wave1.webp" && echo 0)" \
+        "her --check runs on the new pack before it goes in: failing with mochi's art, the pack without it goes in"
+    touch "$PACK/old-pack"
+    sed -i 's/^\(meta\tpack\t\).*/\1f00dcafe0badf00-0-x0/' "$RECEIPT"
+    UPSCALE=1 FAIL=all pack
+    r=$PRC
+    check "$([ "$r" != 0 ] && said "make-pack couldn't build her pack" && [ -f "$PACK/old-pack" ] && [ ! -e "$PACK.new" ] && [ "$(builds)" = 2 ] && echo 0)" \
+        "CapriCore failing: the install stops (exit $r) after trying without mochi's art, and the pack there stays as it was"
+    exit "$fails"
+) || fails=$((fails + $?))
+
 if [ "$fails" -gt 0 ]; then
     echo "$fails install.sh unit check(s) failed"
     exit 1

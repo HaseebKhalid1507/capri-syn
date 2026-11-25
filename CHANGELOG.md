@@ -2,6 +2,34 @@
 
 ## Unreleased
 
+- **The installers build her full pack by default.** mochi's art (her intro close-ups, the cut-ins and
+  the Line's faces, her hair repainted red) now comes with CapriCore and lachy's on every install path:
+  `install.sh`, `install.ps1`, her Windows installer's "Download her art" (a box under it, ticked) and
+  `steps.ps1 pack`. `--no-local-art` (`-NoLocalArt`, `/LOCALART=off`, the box unticked) leaves it out;
+  `--with-local-art` (`-WithLocalArt`, `steps.ps1 -LocalArt`), its old opt-in, puts it back after that.
+  Missing intro or cut-in animations? Run the install command again: a pack built without mochi's art
+  (and not asked to be) is built again with it.
+- **lachy's strips at x2, as an install option**: `--upscale` (`-Upscale`, `/UPSCALE=on`, its box on the
+  pack page) runs `make-pack --upscale` with torch's CPU build in the installer's own Python. Off by
+  default (`pack_upscale` in `installer/manifest`; `--no-upscale` says so): measured on an i5-13420H it
+  is ~255 MB more to download (torch's CPU wheel and scipy; ~1.1 GB in the venv, +219 MB of strips) and
+  44 min of CPU (4 threads at `nice 19`; 144 CPU-minutes).
+  torch is pinned to 2.15.0 (the version the x2 pins were checked with; Python 3.11+).
+  Neither extra can fail an install: without numpy and Pillow mochi's close-ups keep her hair as
+  drawn; anything failing with mochi's art (make-pack, or her `--check`, now run on the new pack before
+  it replaces the old, on Linux too) is said and her pack is built without it; a failed upscale (or its
+  pip) is said and her pack is built without the x2 strips, which a plain rerun doesn't retry on the
+  same files. A rerun keeps what was asked last time (`--no-local-art`, `--upscale`; her Windows
+  installer's boxes start that way); `/LOCALART=` and `/UPSCALE=` take `0`/`no`/`false` and
+  `1`/`yes`/`true` too. Her Windows installer now carries mochi's pins and `tools/mochi_hair.py`, and
+  both installers `tools/upscale_art.py` and its pins.
+- **What the installers say about her art** is what's true: it's downloaded onto your machine from
+  the repositories that publish it (lachydotmcg/capri-desktop, mochiiwuff/capri-desktop), and the art
+  files are not in capri-syn's repository. lachy's desktop art is under PolyForm Noncommercial 1.0.0;
+  mochi's repository's licence (the same) is for its code, and its README's "Credits and rights" is
+  quoted for its images. The "local personal use only" warnings are gone from the prompts, the logs
+  and the pack's `NOTICE.md`, which keeps every Required Notice line.
+
 - **Hyprland Lua summon bindings**: the installer prefers `hyprland.lua`, writes Lua press/release
   bindings and tags them so live collision checks keep the same key on reinstall. The optional
   mic toggle is checked too; occupied chords fall back together to Super+Alt+C / Super+Alt+Ctrl+C.

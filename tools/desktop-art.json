@@ -1527,7 +1527,7 @@
   "commit": "c011764ca1fdbd191925321e3aaa8af5b84babe8",
   "root": "assets/capri",
   "localOnly": true,
-  "note": "Show frames, a fan cut-out and fan art: local personal use only. make-pack lists the copied files (name, sha256, kind by name: capri-cutout/capri-full = cutout, capri-face/face-* = face, cutin-* = cutin, intro-* = intro)."
+  "note": "Show frames, a fan cut-out and fan art: its licence covers its code, not them; its README notes their rights (NOTICE.md). make-pack lists the copied files (name, sha256, kind by name: capri-cutout/capri-full = cutout, capri-face/face-* = face, cutin-* = cutin, intro-* = intro)."
  },
  "capricore": {
   "repo": "CapriChooms/CapriCore",

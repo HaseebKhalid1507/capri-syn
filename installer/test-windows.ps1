@@ -117,6 +117,7 @@ Test-HerLicence -App $app
 Check (Test-Path (Join-Path $pack 'sprites.json')) "her pack in $pack"
 Check (Test-Path (Join-Path $pack 'persona.md')) 'with her persona'
 Check (Test-Path (Join-Path $pack 'anim\lachy\LICENSE.md')) "and lachy's art, with its licence"
+Check (Test-Path (Join-Path $pack 'anim\mochi\LICENSE')) "and mochi's art, with its licence (the default)"
 Check (Test-Path $receipt) "a receipt ($receipt)"
 # The end: she's started (or it says why not); --yes is her brain later (nothing signed in to).
 $installText = Get-Content -Raw (Join-Path $logs 'install.log')
@@ -153,6 +154,24 @@ if ($installText -match "she's up \(") {
     Check ([bool]$stop) "a rerun stops the run going, by pid, and says so: $stop"
     Check ($rerun -match "she's up \(\d+ ms") 'and starts her again'
 }
+
+# 2b. --no-local-art: her pack again, without mochi's art, and a plain rerun keeps it so (the pack's
+# marker notes what was asked). A lean pack with nothing noted (made before mochi's art was the
+# default): the next run builds the full pack, the upgrade.
+$code = Invoke-Installer 'lean' @('--yes', '--no-autostart', '--no-local-art', '--artifact', $Setup)
+$lean = Get-Content -Raw (Join-Path $logs 'lean.log')
+Check ($code -eq 0 -and $lean -notmatch 'up to date \(' -and -not (Test-Path (Join-Path $pack 'anim\mochi'))) "--no-local-art: her pack is built again, without mochi's art ($code)"
+Check ($lean -match 'her pack\s+capri \(CapriCore v1\.0\.4 \+ lachy\)') "and the summary says so: $([regex]::Match($lean, 'her pack\s+capri [^\r\n]*').Value)"
+$code = Invoke-Installer 'lean-again' @('--yes', '--no-autostart', '--artifact', $Setup)
+$again = Get-Content -Raw (Join-Path $logs 'lean-again.log')
+Check ($code -eq 0 -and $again -match 'up to date \(' -and $again -match "without mochi's art, as asked last time" -and -not (Test-Path (Join-Path $pack 'anim\mochi'))) "a plain rerun keeps it out: up to date, said ($code)"
+$mark = Join-Path $pack '.capri-syn-pack'
+Set-Content -Encoding Ascii -LiteralPath $mark -Value @(Get-Content -LiteralPath $mark | Where-Object { $_ -notlike 'choice=*' })
+$code = Invoke-Installer 'full' @('--yes', '--no-autostart', '--artifact', $Setup)
+$full = Get-Content -Raw (Join-Path $logs 'full.log')
+Check ($code -eq 0 -and $full -notmatch 'up to date \(' -and (Test-Path (Join-Path $pack 'anim\mochi\LICENSE'))) "a lean pack with no choice noted, rerun with the defaults: the full pack, mochi's art in it ($code)"
+Check ($full -match 'her pack\s+capri \(CapriCore v1\.0\.4 \+ lachy \+ mochi\)') "and the summary says so: $([regex]::Match($full, 'her pack\s+capri [^\r\n]*').Value)"
+Check ($full -match 'from the repositories that publish it \(lachydotmcg/capri-desktop, mochiiwuff/capri-desktop\)' -and $full -match 'its README \("Credits and rights"\): ') "and it says where the art came from, and mochi's README's own words"
 
 # 3. --uninstall: nothing of hers is left; Synaps stays.
 $code = Invoke-Installer 'uninstall' @('--uninstall')
